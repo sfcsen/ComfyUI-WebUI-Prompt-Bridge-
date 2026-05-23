@@ -2,101 +2,142 @@
 
 ![ComfyUI WebUI Prompt Bridge workflow](docs/images/webui-prompt-bridge-workflow.png)
 
-**ComfyUI WebUI Prompt Bridge** brings WebUI-style prompt editing into ComfyUI: visual tag chips, Chinese-to-English prompt translation, autocomplete, favorites, styles, prompt history, LoRA tag parsing and real LoRA application through the ComfyUI model / CLIP path.
+## 中文介绍
 
-It is built for anime and Anima workflows where prompt speed matters: type naturally, translate quickly, organize tags visually, confirm LoRAs are actually loaded, then generate without leaving the graph.
+**ComfyUI WebUI Prompt Bridge** 是一个给 ComfyUI 使用的 WebUI 式提示词编辑节点。它的目标很简单：让你在 ComfyUI 里也能像 WebUI 那样顺手地写提示词、点标签、翻译中文、收藏常用词、管理负面词，并且确认 LoRA 真的被加载到了模型里。
 
-## Node Preview
+很多人用 ComfyUI 时会遇到两个问题：
+
+- ComfyUI 的普通文本框适合连接节点，但不适合大量编辑 Tag。
+- WebUI 的提示词体验很好，但工作流能力不如 ComfyUI 灵活。
+
+这个节点就是把两边的优点合到一起：**ComfyUI 负责工作流，WebUI Prompt Bridge 负责提示词操作**。
+
+## 节点特写
 
 ![WebUI Prompt Bridge node close-up](docs/images/webui-prompt-bridge-node-panel.png)
 
-The node acts like a prompt control panel rather than a plain multiline textbox:
+这个节点不是普通的大文本框，而是一个完整的提示词操作面板：
 
-- Write Chinese or English prompts and translate them into model-friendly English.
-- Split prompts into editable chips with copy, disable, delete, weight and drag reorder controls.
-- Browse WebUI-style grouped tags, favorites, history, negative prompts and styles.
-- Use autocomplete data from TagComplete when a WebUI install is connected.
-- Parse `<lora:name:weight>` tags, detect missing LoRAs and apply valid LoRAs to model and CLIP.
+- 可以直接输入中文自然语言，并自动翻译成更适合模型的英文提示词。
+- 可以把提示词拆成一个个标签块，方便编辑、删除、禁用、复制、加权和拖拽排序。
+- 可以像 WebUI 一样浏览分类标签，例如人物、服饰、表情、动作、画面、环境、负面词等。
+- 可以收藏常用提示词，也可以读取历史记录。
+- 可以读取 WebUI 的 `styles.csv` 样式。
+- 可以接入 WebUI 的 Prompt All in One 和 TagComplete 数据。
+- 可以识别 `<lora:name:weight>`，检查 LoRA 是否存在，并真正应用到 ComfyUI 的 model / clip 链路里。
 
-## 中文简介
+## 主要功能
 
-**ComfyUI WebUI Prompt Bridge** 是一个把 WebUI 式提示词编辑体验移植到 ComfyUI 的自定义节点。它把中文自动翻译、Tag 自动补全、提示词分块编辑、收藏、历史记录、样式管理、LoRA 检测和 LoRA 实际加载整合在一个节点里。
+- **中文自动翻译**：输入中文后可以转成英文提示词，适合不想手写英文 Tag 的用户。
+- **WebUI 式标签编辑**：提示词以标签块显示，可视化操作比纯文本更直观。
+- **自动补全**：输入字母时可以根据 TagComplete 词库提示可用 Tag。
+- **收藏提示词**：常用角色、服装、画风、表情、动作可以收藏起来反复使用。
+- **负面词管理**：正向提示词和反向提示词都可以分块编辑。
+- **LoRA 真实加载**：不是只把 LoRA 文本塞进 prompt，而是解析 LoRA 标签后调用 ComfyUI 的 LoRA 加载逻辑。
+- **LoRA 缺失提醒**：找不到 LoRA 时可以直接报错，避免你以为 LoRA 生效了但其实没用。
+- **WebUI 数据桥接**：可以复用本机 WebUI 扩展里的标签、收藏、翻译配置和样式。
 
-它适合二次元、Anima 和大量 Tag 操作的工作流：你可以直接输入中文自然语言，自动转成英文提示词；也可以像 WebUI 一样点选分类标签、收藏常用提示词、整理负面词，并确认 LoRA 是否真实生效。
+## 推荐工作流
 
-## Recommended Workflow
-
-This repository includes a recommended Anima workflow:
+仓库里已经带了一个推荐工作流：
 
 ```text
 workflows/anima-webui-prompt-bridge.json
 ```
 
-The workflow is designed as a full Anima production graph around this node:
+这个工作流是围绕 Anima / Qwen 图像模型整理的完整生图工作流，不只是一个单节点示例。它把提示词编辑、模型加载、LoRA、高清放大、脸部修复、手部修复、姿势控制、参考图控制和多种输出方式放在了一张图里。
 
-- **Prompt cockpit**: one WebUI Prompt Bridge node controls positive prompt, negative prompt, styles, favorites, translation and LoRA tags.
-- **Anima base generation**: Anima model, text encoder and VAE are wired into the prompt bridge and sampler.
-- **Model switch**: one lazy switch can choose either Anima/Qwen split loaders or a full `CheckpointLoaderSimple` model.
-- **HiRes switch**: optional latent upscale and second-pass denoise for cleaner details.
-- **Face and hand detailers**: optional repair branches for portraits and character images.
-- **Multiple upscale outputs**: model upscale, pixel scale, target megapixel and fixed-size output controls.
-- **Reference and pose control**: optional reference image, DWPose / OpenPose / Canny / lineart preprocessors and Qwen Union pose LoRA path.
-- **Clean control panel**: width, height, batch size, HiRes scale, denoise strength, hand threshold and output sizing are exposed as editable controls.
+### 工作流包含什么
+
+- **提示词主控节点**：用 WebUI Prompt Bridge 管理正向词、反向词、翻译、收藏、样式和 LoRA。
+- **Anima 分体模型加载**：默认使用 `UNET + CLIP + VAE` 的 Anima/Qwen 分体结构。
+- **整合模型切换**：也可以切到 `CheckpointLoaderSimple`，使用普通整合 checkpoint。
+- **高清重绘**：支持 latent 放大后二次采样。
+- **面部修复**：可选开启 Face Detailer。
+- **手部修复**：可选开启 Hand Detailer，并且可以调检测阈值。
+- **模型超分**：支持 RealESRGAN 等超分模型。
+- **后期尺寸控制**：支持倍率缩放、目标总像素、固定宽高输出。
+- **参考图控制**：可以接入参考图，引导画面风格或构图。
+- **姿势控制**：支持 DWPose / OpenPose / Canny / Lineart 等预处理分支。
+
+## 模型切换说明
 
 ![Anima workflow model switch](docs/images/anima-model-switch-panel.png)
 
-Recommended use:
+工作流里有一个模型模式开关：
 
-1. Install this custom node.
-2. Import `workflows/anima-webui-prompt-bridge.json` into ComfyUI.
-3. Place required models in your own ComfyUI model folders.
-4. Start from the prompt bridge node, then enable HiRes, detailers, pose or upscale branches only when needed.
+```text
+模型模式：分体Anima/Qwen ON，关闭=整合Checkpoint
+```
 
-Required model names used by the example workflow:
+它的含义是：
+
+- **开关 ON**：使用 Anima/Qwen 分体模型，也就是 `UNET + CLIP + VAE`。这是推荐默认模式，适合当前 Anima 工作流。
+- **开关 OFF**：使用普通整合 checkpoint，也就是 `CheckpointLoaderSimple`。适合 SD1.5、SDXL、Pony、Illustrious、Qwen-Rapid-AIO 这类整合模型。
+
+我已经实际测试过：
+
+- 分体 Anima/Qwen 模式可以正常生成。
+- 整合 Checkpoint 模式可以用 `Qwen-Rapid-AIO-NSFW-v16.safetensors` 正常生成。
+
+注意：如果你切到普通 SDXL / Pony / Illustrious checkpoint，建议先关闭参考图、Qwen Union 姿势控制等 Qwen 专用分支，避免编码器或模型结构不兼容。
+
+## 需要准备的模型
+
+推荐工作流默认会用到这些文件名：
 
 - `anima_baseV10.safetensors`
 - `anima_baseV10_txt.safetensors`
 - `qwen_image_vae.safetensors`
-- Optional full checkpoint branch: `Qwen-Rapid-AIO-NSFW-v16.safetensors`, or any compatible SD1.5 / SDXL / Pony / Illustrious checkpoint in your own model folder.
 - `RealESRGAN_x4plus_anime_6B.pth`
-- Optional: `qwen_image_union_diffsynth_lora.safetensors`
-- Optional DWPose / ControlNet aux detector files such as `yolox_l.torchscript.pt`
+- 可选整合模型：`Qwen-Rapid-AIO-NSFW-v16.safetensors`
+- 可选姿势 LoRA：`qwen_image_union_diffsynth_lora.safetensors`
+- 可选 DWPose 检测器：`yolox_l.torchscript.pt`
 
-Models and LoRAs are **not** included in this repository. Check each model license before redistribution.
+仓库**不包含任何模型、LoRA、VAE、放大模型或检测器文件**。你需要自己下载并放到 ComfyUI 对应模型目录里。发布或分享工作流时也要注意每个模型自己的授权协议。
 
-Verified locally:
+## 安装方法
 
-- Split Anima/Qwen mode generated successfully.
-- Full checkpoint mode generated successfully with `Qwen-Rapid-AIO-NSFW-v16.safetensors`.
-
-## Install
-
-Clone into `ComfyUI/custom_nodes`:
+把仓库克隆到 `ComfyUI/custom_nodes`：
 
 ```bash
 git clone https://github.com/dianfangsihuo/ComfyUI-WebUI-Prompt-Bridge.git
 ```
 
-Install requirements if your ComfyUI environment does not already include them:
+如果你的 ComfyUI 环境缺依赖，再安装：
 
 ```bash
 pip install -r ComfyUI-WebUI-Prompt-Bridge/requirements.txt
 ```
 
-Restart ComfyUI, then add:
+重启 ComfyUI 后，在节点菜单里添加：
 
 ```text
 conditioning/webui -> WebUI Prompt Bridge
 ```
 
-## Optional WebUI Data Bridge
+## 推荐使用步骤
 
-For the full WebUI-like experience, point the node to an existing AUTOMATIC1111 WebUI folder with these extensions installed:
+1. 安装这个自定义节点。
+2. 在 ComfyUI 里导入 `workflows/anima-webui-prompt-bridge.json`。
+3. 按上面的模型列表放好模型文件。
+4. 先保持模型模式开关为 ON，跑默认 Anima/Qwen 分体模式。
+5. 在 WebUI Prompt Bridge 节点里输入中文或英文提示词。
+6. 使用翻译、标签补全、收藏和分类标签整理提示词。
+7. 如果提示词里写了 `<lora:name:weight>`，确认 LoRA 名字能被匹配到。
+8. 需要更高清时再开启 HiRes、Face Detail、Hand Detail、Model Upscale。
+9. 需要姿势或参考图时再打开对应开关。
+10. 如果想换普通 checkpoint，把模型模式开关关掉，然后在备用整合模型节点里选择 checkpoint。
+
+## 接入本机 WebUI 数据
+
+如果你想要更接近 WebUI 的体验，可以连接你本机的 AUTOMATIC1111 WebUI 目录。推荐安装这两个 WebUI 扩展：
 
 - `sd-webui-prompt-all-in-one`
 - `a1111-sd-webui-tagcomplete`
 
-Copy `config.local.example.json` to `config.local.json` and edit the paths:
+复制 `config.local.example.json` 为 `config.local.json`，然后改成本机路径：
 
 ```json
 {
@@ -108,43 +149,75 @@ Copy `config.local.example.json` to `config.local.json` and edit the paths:
 }
 ```
 
-`config.local.json` is ignored by git so private local paths are not published.
+`config.local.json` 不会被提交到 GitHub，所以你的本机路径不会被公开。
 
-## LoRA Behavior
+## LoRA 怎么写
 
-The node removes LoRA tags from the final text prompt, resolves them against ComfyUI's `loras` folder, and applies them through ComfyUI's LoRA loader API.
-
-Example:
+直接在正向提示词里写：
 
 ```text
 1girl, blue dress, standing by the sea, <lora:my-style-lora:0.75>
 ```
 
-If `fail_on_missing_lora` is enabled, generation stops when a referenced LoRA is not found. This avoids silent LoRA failures.
+节点会做几件事：
 
-## RunningHub Publishing Notes
+1. 从提示词里解析出 LoRA 标签。
+2. 到 ComfyUI 的 `loras` 目录里查找对应文件。
+3. 找到后把 LoRA 应用到 model 和 clip。
+4. 把 LoRA 标签从最终文本提示词里移除，避免污染编码文本。
+5. 如果找不到 LoRA，并且开启了 `Missing LoRA stops`，就停止生成并报错。
 
-To publish the recommended workflow on RunningHub:
+这样可以避免一个很常见的问题：提示词里写了 LoRA，但实际模型根本没加载。
 
-1. Import `workflows/anima-webui-prompt-bridge.json` into a RunningHub ComfyUI workspace.
-2. Install or map this custom node and all required dependency nodes.
-3. Upload or select the required Anima, VAE, upscaler, LoRA and detector models according to their licenses.
-4. Run the workflow successfully once inside RunningHub.
-5. Save it as a reusable workflow or app.
-6. Add a clear cover image, node close-up screenshot, model dependency list, and usage notes.
-7. Publish it from RunningHub's workflow/app publish entry.
+## RunningHub 发布建议
 
-Suggested RunningHub title:
+如果要把这个工作流发布到 RunningHub，建议这样做：
+
+1. 在 RunningHub 的 ComfyUI 工作区导入 `workflows/anima-webui-prompt-bridge.json`。
+2. 安装或映射这个自定义节点。
+3. 安装工作流需要的其他自定义节点，例如 Impact Pack、KJNodes、ControlNet Aux、Detailer 相关节点等。
+4. 上传或选择需要的 Anima、VAE、放大模型、LoRA、姿势检测器。
+5. 在 RunningHub 里实际跑通一次。
+6. 保存为工作流或应用。
+7. 上传封面图，建议使用节点特写图和工作流总览图。
+8. 在说明里写清楚模型依赖、开关用途、推荐参数和 LoRA 注意事项。
+9. 再从 RunningHub 的发布入口发布。
+
+推荐标题：
 
 ```text
-Anima WebUI Prompt Bridge - Chinese Prompt, LoRA, HiRes, Pose and Upscale Workflow
+Anima WebUI Prompt Bridge 中文提示词工作流
 ```
 
-Suggested short description:
+推荐简介：
 
 ```text
-A full Anima workflow with WebUI-style prompt editing, Chinese-to-English prompt translation, autocomplete, LoRA validation, HiRes, detailers, pose/reference control and multiple upscale modes.
+一个面向 Anima/Qwen 的 ComfyUI 全功能工作流，内置 WebUI 式提示词编辑、中文翻译、Tag 补全、LoRA 检测、模型切换、高清重绘、面部/手部修复、姿势控制和多种放大输出。
 ```
+
+## 常见问题
+
+**为什么我写了 LoRA 但没有效果？**
+
+先确认 LoRA 文件真的在 ComfyUI 的 `models/loras` 目录里，并且名字能被节点匹配到。建议开启 `Missing LoRA stops`，这样找不到 LoRA 会直接报错。
+
+**为什么切到普通 checkpoint 后姿势或参考图报错？**
+
+有些参考图和姿势分支是给 Qwen / Anima 结构准备的。普通 SDXL、Pony、Illustrious 模型不一定兼容。先关闭这些分支，只保留基础生图，确认能跑后再逐个打开。
+
+**为什么自动翻译不完整？**
+
+如果没有连接本机 WebUI 的 Prompt All in One 翻译接口，就只能使用内置兜底逻辑。想要更完整的联网翻译，请配置 `config.local.json` 指向本机 WebUI 扩展目录。
+
+**为什么仓库不带模型？**
+
+模型、LoRA、VAE、放大模型都有自己的授权协议，不能随便打包进插件仓库。这个项目只发布节点和示例工作流。
+
+## English Summary
+
+ComfyUI WebUI Prompt Bridge is a WebUI-style prompt editor for ComfyUI. It supports visual prompt chips, Chinese-to-English prompt translation, autocomplete, favorites, styles, prompt history, LoRA tag parsing and real LoRA application through ComfyUI model / CLIP objects.
+
+The repository includes a recommended Anima workflow with lazy model switching, HiRes, detailers, pose/reference branches and multiple upscale output modes.
 
 ## License
 
