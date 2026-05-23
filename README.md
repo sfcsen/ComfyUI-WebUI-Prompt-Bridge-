@@ -6,11 +6,19 @@
 
 It is designed for people who like ComfyUI's node graph but still want the fast prompt operations from WebUI extensions such as Prompt All in One and TagComplete.
 
+## Node Close-Up
+
+![WebUI Prompt Bridge node close-up](docs/images/webui-prompt-bridge-node-panel.png)
+
+This node is more than a text box. It is a prompt operation panel for ComfyUI: write natural Chinese or English prompts, translate them into model-friendly English, split prompts into editable chips, browse grouped tags, save favorites, manage negative prompts, apply WebUI styles, detect missing LoRAs and inject valid LoRA tags directly into the ComfyUI model / CLIP path.
+
 ## 中文说明
 
 **ComfyUI WebUI Prompt Bridge** 是一个把 WebUI 式提示词编辑体验移植到 ComfyUI 的自定义节点。它把提示词分块编辑、中文自动翻译、Tag 自动补全、收藏、历史记录、样式管理、LoRA 标签解析和 LoRA 实际加载整合到一个 ComfyUI 节点里，适合想继续使用 ComfyUI 工作流，同时又需要 WebUI 那种顺手提示词操作体验的用户。
 
 它可以选择性读取你本机已有的 WebUI 扩展数据，例如 `sd-webui-prompt-all-in-one` 和 `a1111-sd-webui-tagcomplete`，从而复用 WebUI 里的分组标签、收藏、翻译接口和补全词库。仓库本身不包含任何模型、LoRA 或放大模型文件。
+
+这个节点不是普通的多行文本框，而是一个完整的提示词操作面板：可以输入中文自然语言并自动转成英文提示词，可以把提示词拆成可编辑标签块，可以浏览 WebUI 式分类标签，可以收藏常用提示词，可以管理负面词和样式，还可以识别 `<lora:name:weight>` 并确认 LoRA 是否真实存在，最终把 LoRA 应用到 ComfyUI 的 model / clip 链路里。
 
 ### 中文功能概览
 
