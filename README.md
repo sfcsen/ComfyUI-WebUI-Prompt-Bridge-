@@ -169,32 +169,6 @@ conditioning/webui -> WebUI Prompt Bridge
 
 这样可以避免一个很常见的问题：提示词里写了 LoRA，但实际模型根本没加载。
 
-## RunningHub 发布建议
-
-如果要把这个工作流发布到 RunningHub，建议这样做：
-
-1. 在 RunningHub 的 ComfyUI 工作区导入 `workflows/anima-webui-prompt-bridge.json`。
-2. 安装或映射这个自定义节点。
-3. 安装工作流需要的其他自定义节点，例如 Impact Pack、KJNodes、ControlNet Aux、Detailer 相关节点等。
-4. 上传或选择需要的 Anima、VAE、放大模型、LoRA、姿势检测器。
-5. 在 RunningHub 里实际跑通一次。
-6. 保存为工作流或应用。
-7. 上传封面图，建议使用节点特写图和工作流总览图。
-8. 在说明里写清楚模型依赖、开关用途、推荐参数和 LoRA 注意事项。
-9. 再从 RunningHub 的发布入口发布。
-
-推荐标题：
-
-```text
-Anima WebUI Prompt Bridge 中文提示词工作流
-```
-
-推荐简介：
-
-```text
-一个面向 Anima/Qwen 的 ComfyUI 全功能工作流，内置 WebUI 式提示词编辑、中文翻译、Tag 补全、LoRA 检测、模型切换、高清重绘、面部/手部修复、姿势控制和多种放大输出。
-```
-
 ## 常见问题
 
 **为什么我写了 LoRA 但没有效果？**
