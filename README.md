@@ -91,6 +91,16 @@ This repository does not bundle models or LoRAs. Example workflows should use pl
 
 Attribution is listed in `NOTICE.md`.
 
+## ComfyUI Registry
+
+The repository includes `pyproject.toml`, `.comfyignore`, and a GitHub Actions workflow for the official ComfyUI Registry publish action.
+
+To publish a new registry version:
+
+1. Create a publisher and API key on Comfy Registry.
+2. Add the key to this GitHub repository as an Actions secret named `REGISTRY_ACCESS_TOKEN`.
+3. Run the `Publish to Comfy Registry` workflow, or bump `pyproject.toml` version and push to `main`.
+
 ## License
 
 MIT. See `LICENSE`.
