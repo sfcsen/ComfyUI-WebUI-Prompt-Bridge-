@@ -13,6 +13,8 @@
 
 这个节点就是把两边的优点合到一起：**ComfyUI 负责工作流，WebUI Prompt Bridge 负责提示词操作**。
 
+新用户可以先从中文最小工作流教程开始：`docs/tutorial-minimal-workflows.md`。教程分别演示 Anima 分体模型和 XL 整合 checkpoint 的最小接线，并配有截图和可直接拖入 ComfyUI 的 JSON 工作流。
+
 ## 节点特写
 
 ![WebUI Prompt Bridge node close-up](docs/images/webui-prompt-bridge-node-panel.png)
