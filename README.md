@@ -54,6 +54,17 @@ workflows/anima-webui-prompt-bridge.json
 
 这个工作流是围绕 Anima / Qwen 图像模型整理的完整生图工作流，不只是一个单节点示例。它把提示词编辑、模型加载、LoRA、高清放大、脸部修复、手部修复、姿势控制、参考图控制和多种输出方式放在了一张图里。
 
+如果你只想学习节点的最小接线，可以先看中文教程：
+
+```text
+docs/tutorial-minimal-workflows.md
+```
+
+教程里提供了两个最小工作流：
+
+- `workflows/tutorial-minimal-anima-webui-prompt-bridge.json`：Anima 分体模型示例。
+- `workflows/tutorial-minimal-xl-webui-prompt-bridge.json`：XL 整合 checkpoint 示例。
+
 ### 工作流包含什么
 
 - **提示词主控节点**：用 WebUI Prompt Bridge 管理正向词、反向词、翻译、收藏、样式和 LoRA。
