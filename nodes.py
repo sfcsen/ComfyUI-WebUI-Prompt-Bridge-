@@ -1,6 +1,7 @@
 import csv
 import datetime
 import hashlib
+import html
 import json
 import os
 import re
@@ -946,7 +947,7 @@ def _translate_local_phrase_to_prompts(item, local_to_prompt):
 
 
 def _normalize_network_prompt(text):
-    text = str(text or "").strip()
+    text = html.unescape(str(text or "")).strip()
     if not text:
         return ""
     text = re.sub(r"[。.!！]+$", "", text)

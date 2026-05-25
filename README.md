@@ -21,6 +21,8 @@
 
 这一版也优化了接入失败时的提示：如果后端接口还没加载，会提示重启 ComfyUI；如果目录不对，会提示选择真正的 WebUI 根目录。
 
+`v0.1.5` 继续修复了 WebUI 翻译返回内容里的 HTML 转义显示问题，让翻译结果更干净。
+
 ## 节点特写
 
 ![WebUI Prompt Bridge node close-up](docs/images/webui-prompt-bridge-node-panel.png)
