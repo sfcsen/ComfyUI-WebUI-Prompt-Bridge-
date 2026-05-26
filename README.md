@@ -15,13 +15,15 @@
 
 新用户可以先从中文最小工作流教程开始：`docs/tutorial-minimal-workflows.md`。教程分别演示 Anima 分体模型和 XL 整合 checkpoint 的最小接线，并配有截图和可直接拖入 ComfyUI 的 JSON 工作流。
 
-## v0.1.4 新版简介
+## v0.1.7 更新说明
 
-这一版重点降低 WebUI 数据接入门槛。用户只需要在节点里点 `一键接入 WebUI`，选择 WebUI 根目录，节点就会自动识别提示词词库、样式、LoRA、checkpoint、VAE、embeddings 和 ControlNet 等常用目录。自动检测成功后会直接刷新节点里的提示词、样式、LoRA 和模型列表。
+这一版重点修复提示词面板的布局体验：Prompt 文本框、已输入 tag 区、Prompt All in One 标签区和 Extra Networks 之间的高度都可以拖动调整；反向提示词折叠后会释放空间，不再留下大块空白；tag 编辑工具条也会自动避开底部面板和右侧滚动条，减少被遮挡的问题。
 
-这一版也优化了接入失败时的提示：如果后端接口还没加载，会提示重启 ComfyUI；如果目录不对，会提示选择真正的 WebUI 根目录。
+使用小技巧：在已输入的提示词 tag 上双击，可以隐藏/禁用这个 tag，再双击可以恢复；被禁用的 tag 不会写入生成提示词。
 
-`v0.1.5` 继续修复了 WebUI 翻译返回内容里的 HTML 转义显示问题，让翻译结果更干净。
+下一个版本计划增加更详细的设置功能，把翻译、布局、标签显示、LoRA 卡片和本机 WebUI 接入选项整理到更清晰的设置面板里。
+
+完整更新记录见 `CHANGELOG.md`。
 
 ## 节点特写
 
@@ -123,6 +125,12 @@ docs/tutorial-minimal-workflows.md
 - 可选 DWPose 检测器：`yolox_l.torchscript.pt`
 
 仓库**不包含任何模型、LoRA、VAE、放大模型或检测器文件**。你需要自己下载并放到 ComfyUI 对应模型目录里。发布或分享工作流时也要注意每个模型自己的授权协议。
+
+## 安全注意事项
+
+这个节点会读取本机 WebUI/ComfyUI 的样式、提示词词库、LoRA metadata 和预览图，也会在用户主动操作时写入 `config.local.json`、`styles.csv`、Prompt-All-in-One storage 以及 LoRA 旁边的 metadata/preview 文件。请只接入你信任的 WebUI 目录，不要把未加认证的 ComfyUI 暴露到公网或不可信局域网。
+
+后端接口会拒绝跨来源写请求，并限制上传图片类型、预览图大小和文本字段长度；如果你通过反向代理部署 ComfyUI，请确保代理正确传递 `Host`、`Origin` 或 `Referer` 头。
 
 ## 安装方法
 

@@ -15,6 +15,7 @@ const PANEL_MIN_WIDTH = 760;
 const PANEL_MAX_WIDTH = 1600;
 const PANEL_MIN_HEIGHT = 620;
 const DOM_WIDGET_LAYOUT_PAD = 58;
+const PROMPT_CHIPS_MIN_HEIGHT = 104;
 const SPLIT_ANIMA_MODEL_VALUE = "__webui_bridge_split_anima_qwen__";
 const SPLIT_ANIMA_MODEL_LABEL = "分体 Anima/Qwen（Anima UNET + Text Encoder + VAE）";
 const DEFAULT_QUALITY_TAGS = [
@@ -120,6 +121,241 @@ function getWidget(node, name) {
     return node?.widgets?.find((widget) => widget.name === name);
 }
 
+function installWidgetSerializationFallback(widget, serializer = null) {
+    if (!widget) return 0;
+    const serializeWidget = serializer || function () {
+        if (this.serialize === false || this.options?.serialize === false) return null;
+        return {
+            name: this.name,
+            type: this.type,
+            value: this.value,
+        };
+    };
+    let patched = 0;
+    if (typeof widget.asSerializable !== "function") {
+        widget.asSerializable = serializeWidget;
+        patched += 1;
+    }
+    if (typeof widget.asSerialisable !== "function") {
+        widget.asSerialisable = widget.asSerializable || serializeWidget;
+        patched += 1;
+    }
+    return patched;
+}
+
+function readLocalBoolean(key, fallback = false) {
+    try {
+        const value = localStorage.getItem(key);
+        if (value === null) return fallback;
+        return value === "1" || value === "true";
+    } catch {
+        return fallback;
+    }
+}
+
+function writeLocalBoolean(key, value) {
+    try {
+        localStorage.setItem(key, value ? "1" : "0");
+    } catch {
+        // Ignore private-mode or quota failures; UI state can be ephemeral.
+    }
+}
+
+function readLocalString(key, fallback = "") {
+    try {
+        return localStorage.getItem(key) || fallback;
+    } catch {
+        return fallback;
+    }
+}
+
+function writeLocalString(key, value) {
+    try {
+        localStorage.setItem(key, String(value || ""));
+    } catch {
+        // Ignore private-mode or quota failures; UI state can be ephemeral.
+    }
+}
+
+function readLocalNumber(key, fallback = null) {
+    try {
+        const raw = localStorage.getItem(key);
+        if (raw === null || raw === "") return fallback;
+        const value = Number(raw);
+        return Number.isFinite(value) ? value : fallback;
+    } catch {
+        return fallback;
+    }
+}
+
+function writeLocalNumber(key, value) {
+    try {
+        localStorage.setItem(key, String(Math.round(value)));
+    } catch {
+        // Ignore private-mode or quota failures; UI state can be ephemeral.
+    }
+}
+
+function clearLocalValue(key) {
+    try {
+        localStorage.removeItem(key);
+    } catch {
+        // Ignore private-mode or quota failures; UI state can be ephemeral.
+    }
+}
+
+function clampNumber(value, min, max) {
+    return Math.min(max, Math.max(min, Number(value) || min));
+}
+
+function applyStoredHeight(target, storageKey, { min = 48, max = 640 } = {}) {
+    const value = readLocalNumber(storageKey, null);
+    if (value === null) return;
+    const height = clampNumber(value, min, max);
+    target.style.height = `${height}px`;
+    target.style.flex = "0 0 auto";
+}
+
+function resolveResizeValue(value) {
+    return typeof value === "function" ? value() : value;
+}
+
+function resizeTargetHidden(target) {
+    if (!target) return true;
+    if (!target.getClientRects?.().length) return true;
+    return getComputedStyle(target).display === "none";
+}
+
+function resizeTargetKey(target, storageKey) {
+    return resolveResizeValue(storageKey) || target?.__webuiBridgeHeightKey || "";
+}
+
+function resizeTargetMin(target, fallback) {
+    return Number(resolveResizeValue(fallback) ?? target?.__webuiBridgeMinHeight ?? 48);
+}
+
+function resizeTargetMax(target, fallback) {
+    return Number(resolveResizeValue(fallback) ?? target?.__webuiBridgeMaxHeight ?? 640);
+}
+
+function setResizeTargetHeight(target, storageKey, height, { min = 48, max = 640 } = {}) {
+    if (!target) return;
+    const nextHeight = clampNumber(height, min, max);
+    target.style.height = `${nextHeight}px`;
+    target.style.flex = "0 0 auto";
+    const key = resizeTargetKey(target, storageKey);
+    if (key) writeLocalNumber(key, nextHeight);
+}
+
+function resetResizeTargetHeight(target, storageKey, fill = "") {
+    if (!target) return;
+    const key = resizeTargetKey(target, storageKey);
+    if (key) clearLocalValue(key);
+    target.style.height = "";
+    target.style.flex = fill;
+}
+
+function applyTopRowCollapsedState(topRow, collapsed) {
+    if (!topRow) return;
+    topRow.classList.toggle("negative-collapsed", collapsed);
+    if (collapsed) {
+        topRow.style.height = "";
+        topRow.style.flex = "";
+        return;
+    }
+    applyStoredHeight(topRow, topRow.__webuiBridgeHeightKey, {
+        min: topRow.__webuiBridgeMinHeight || 300,
+        max: topRow.__webuiBridgeMaxHeight || 980,
+    });
+}
+
+function createHeightResizeGrip(target, storageKey, { min = 48, max = 640, title = "拖动调整高度，双击恢复" } = {}) {
+    const grip = el("div", {
+        class: "webui-bridge-section-resizer",
+        title,
+        ondblclick: (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            resetResizeTargetHeight(target, storageKey);
+        },
+        onpointerdown: (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const startY = event.clientY;
+            const startHeight = target.getBoundingClientRect().height;
+            grip.setPointerCapture?.(event.pointerId);
+            const onMove = (moveEvent) => {
+                setResizeTargetHeight(target, storageKey, startHeight + moveEvent.clientY - startY, { min, max });
+            };
+            const onUp = () => {
+                document.removeEventListener("pointermove", onMove, true);
+                document.removeEventListener("pointerup", onUp, true);
+                document.removeEventListener("pointercancel", onUp, true);
+            };
+            document.addEventListener("pointermove", onMove, true);
+            document.addEventListener("pointerup", onUp, true);
+            document.addEventListener("pointercancel", onUp, true);
+        },
+    });
+    return grip;
+}
+
+function createHeightSplitGrip(beforeTarget, afterTarget, beforeKey, afterKey, options = {}) {
+    const grip = el("div", {
+        class: `webui-bridge-section-resizer webui-bridge-split-resizer${options.className ? ` ${options.className}` : ""}`,
+        title: options.title || "上下拖动调整两侧高度，双击恢复",
+        ondblclick: (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            resetResizeTargetHeight(resolveResizeValue(beforeTarget), beforeKey);
+            resetResizeTargetHeight(resolveResizeValue(afterTarget), afterKey, options.fillAfter ? "1 1 0" : "");
+        },
+        onpointerdown: (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const before = resolveResizeValue(beforeTarget);
+            const after = resolveResizeValue(afterTarget);
+            if (!before) return;
+            const beforeMin = resizeTargetMin(before, options.beforeMin ?? options.min);
+            const beforeMax = resizeTargetMax(before, options.beforeMax ?? options.max);
+            const afterVisible = after && !resizeTargetHidden(after);
+            const afterMin = resizeTargetMin(after, options.afterMin ?? options.min);
+            const afterMax = resizeTargetMax(after, options.afterMax ?? options.max);
+            const startY = event.clientY;
+            const startBefore = before.getBoundingClientRect().height;
+            const startAfter = afterVisible ? after.getBoundingClientRect().height : 0;
+            const total = startBefore + startAfter;
+            grip.setPointerCapture?.(event.pointerId);
+            const onMove = (moveEvent) => {
+                const rawBefore = startBefore + moveEvent.clientY - startY;
+                if (!afterVisible || total <= beforeMin + afterMin) {
+                    setResizeTargetHeight(before, beforeKey, rawBefore, { min: beforeMin, max: beforeMax });
+                    return;
+                }
+                const minBefore = Math.max(beforeMin, total - afterMax);
+                const maxBefore = Math.min(beforeMax, total - afterMin);
+                const nextBefore = clampNumber(rawBefore, minBefore, Math.max(minBefore, maxBefore));
+                setResizeTargetHeight(before, beforeKey, nextBefore, { min: minBefore, max: maxBefore });
+                if (options.fillAfter) {
+                    resetResizeTargetHeight(after, afterKey, "1 1 0");
+                } else {
+                    const nextAfter = total - nextBefore;
+                    setResizeTargetHeight(after, afterKey, nextAfter, { min: afterMin, max: afterMax });
+                }
+            };
+            const onUp = () => {
+                document.removeEventListener("pointermove", onMove, true);
+                document.removeEventListener("pointerup", onUp, true);
+                document.removeEventListener("pointercancel", onUp, true);
+            };
+            document.addEventListener("pointermove", onMove, true);
+            document.addEventListener("pointerup", onUp, true);
+            document.addEventListener("pointercancel", onUp, true);
+        },
+    });
+    return grip;
+}
+
 function clampPanelSize(width, height) {
     const nextHeight = Math.max(PANEL_MIN_HEIGHT, Math.round(height || DEFAULT_PANEL_HEIGHT));
     const ratioWidth = Math.ceil(nextHeight * 0.78);
@@ -135,6 +371,7 @@ function looksLikeLegacyDefaultSize(size) {
 
 function hideWidget(widget) {
     if (!widget || widget.__webuiBridgeHidden) return;
+    installWidgetSerializationFallback(widget);
     widget.__webuiBridgeHidden = true;
     widget.origComputeSize = widget.computeSize;
     widget.computeSize = () => [0, 0];
@@ -708,6 +945,29 @@ function favoriteForPrompt(state, kind, prompt) {
     return (state.promptAllInOne?.favorites?.[kind] || []).find((item) => String(item.prompt || "").trim() === target);
 }
 
+function positionChipTools(chips, chip, tools) {
+    if (!chips || !chip || !tools) return;
+    const chipsRect = chips.getBoundingClientRect();
+    const chipRect = chip.getBoundingClientRect();
+    if (!chipsRect.width || !chipRect.width) return;
+    const scrollbarWidth = Math.max(0, chips.offsetWidth - chips.clientWidth);
+    const viewportLeft = chipsRect.left + 6;
+    const viewportRight = chipsRect.right - scrollbarWidth - 6;
+    const maxWidth = Math.max(180, Math.min(420, viewportRight - viewportLeft));
+    tools.style.maxWidth = `${Math.round(maxWidth)}px`;
+    tools.style.left = "-1px";
+    tools.style.right = "auto";
+    const measuredWidth = Math.min(tools.scrollWidth || tools.getBoundingClientRect().width || maxWidth, maxWidth);
+    const minLeft = viewportLeft - chipRect.left;
+    const maxLeft = viewportRight - chipRect.left - measuredWidth;
+    const nextLeft = maxLeft < minLeft ? minLeft : clampNumber(-1, minLeft, maxLeft);
+    tools.style.left = `${Math.round(nextLeft)}px`;
+    const toolsHeight = tools.getBoundingClientRect().height || 30;
+    const downSpace = chipsRect.bottom - chipRect.bottom - 8;
+    const upSpace = chipRect.top - chipsRect.top - 8;
+    chip.classList.toggle("tools-up", downSpace < toolsHeight + 6 && upSpace > downSpace);
+}
+
 async function refreshFavoritesFromResult(state, result) {
     if (result?.favorites) state.promptAllInOne.favorites = result.favorites;
 }
@@ -746,6 +1006,7 @@ function renderPromptChips(row, textarea, state, afterChange, kind = "positive")
             title = `${tag.value}\n已禁用，不会写入生成提示词`;
         }
         const favorite = favoriteForPrompt(state, kind, tag.value);
+        let tools = null;
         const chip = el("div", {
             class: className,
             title,
@@ -753,6 +1014,7 @@ function renderPromptChips(row, textarea, state, afterChange, kind = "positive")
             onmouseenter: () => {
                 window.clearTimeout(chip.__webuiBridgeHideToolsTimer);
                 chip.classList.add("show-tools");
+                requestAnimationFrame(() => positionChipTools(chips, chip, tools));
             },
             onmouseleave: () => {
                 window.clearTimeout(chip.__webuiBridgeHideToolsTimer);
@@ -775,6 +1037,9 @@ function renderPromptChips(row, textarea, state, afterChange, kind = "positive")
             oncontextmenu: (event) => {
                 event.preventDefault();
                 chip.classList.toggle("show-tools");
+                if (chip.classList.contains("show-tools")) {
+                    requestAnimationFrame(() => positionChipTools(chips, chip, tools));
+                }
             },
             ondragstart: (event) => {
                 if (tag.disabled || event.target.closest(".webui-bridge-chip-tools")) {
@@ -844,7 +1109,7 @@ function renderPromptChips(row, textarea, state, afterChange, kind = "positive")
                 if (!tag.disabled && replacePromptTagAt(textarea, tag.index, setTagNumericWeight(tag.value, event.currentTarget.value))) afterChange?.();
             },
         });
-        const tools = el("div", { class: "webui-bridge-chip-tools" }, [
+        tools = el("div", { class: "webui-bridge-chip-tools" }, [
             tool("-", "降低权重 0.1", () => !tag.disabled && replacePromptTagAt(textarea, tag.index, changeTagNumericWeight(tag.value, -0.1))),
             weightInput,
             tool("+", "提高权重 0.1", () => !tag.disabled && replacePromptTagAt(textarea, tag.index, changeTagNumericWeight(tag.value, 0.1))),
@@ -865,6 +1130,7 @@ function renderPromptChips(row, textarea, state, afterChange, kind = "positive")
             }),
             tool("⧉", "复制当前关键词", () => navigator.clipboard.writeText(tag.value).catch(() => {})),
             tool(favorite ? "★" : "☆", favorite ? "取消收藏" : "加入收藏", async () => {
+                if (favorite && !confirm("只删除这个收藏项？")) return;
                 const action = favorite ? "delete_favorite" : "push_favorite";
                 const result = await updatePromptAllInOneStorage(action, kind, tag.value, local || tag.value, favorite?.id || "");
                 await refreshFavoritesFromResult(state, result);
@@ -876,6 +1142,7 @@ function renderPromptChips(row, textarea, state, afterChange, kind = "positive")
         tools.addEventListener("mouseenter", () => {
             window.clearTimeout(chip.__webuiBridgeHideToolsTimer);
             chip.classList.add("show-tools");
+            requestAnimationFrame(() => positionChipTools(chips, chip, tools));
         });
         tools.addEventListener("mouseleave", () => {
             window.clearTimeout(chip.__webuiBridgeHideToolsTimer);
@@ -1134,10 +1401,29 @@ function getGraphNodeById(id) {
 }
 
 function getGraphLink(linkId) {
-    const links = app.graph?.links || app.graph?._links;
-    if (!links || linkId === undefined || linkId === null) return null;
-    if (Array.isArray(links)) return links.find((link) => String(link?.id ?? link?.[0]) === String(linkId));
-    return links[linkId] || links[String(linkId)] || null;
+    if (linkId === undefined || linkId === null) return null;
+    const ids = [linkId, Number(linkId), String(linkId)];
+    for (const links of [app.graph?._links, app.graph?.links]) {
+        if (!links) continue;
+        let link = null;
+        if (links instanceof Map) {
+            for (const id of ids) {
+                if (links.has(id)) {
+                    link = links.get(id);
+                    break;
+                }
+            }
+        } else if (Array.isArray(links)) {
+            link = links.find((item) => String(item?.id ?? item?.[0]) === String(linkId));
+        } else {
+            link = links[linkId] || links[String(linkId)] || links[Number(linkId)];
+        }
+        if (link) {
+            installGraphLinkSerializationFallback(link);
+            return link;
+        }
+    }
+    return null;
 }
 
 function linkOriginId(link) {
@@ -1148,8 +1434,146 @@ function linkOriginSlot(link) {
     return link?.origin_slot ?? link?.originSlot ?? link?.[2] ?? 0;
 }
 
+function linkTargetId(link) {
+    return link?.target_id ?? link?.targetId ?? link?.[3];
+}
+
+function linkTargetSlot(link) {
+    return link?.target_slot ?? link?.targetSlot ?? link?.[4] ?? 0;
+}
+
 function graphLinkId(link) {
     return link?.id ?? link?.[0];
+}
+
+function slotTypeValues(type) {
+    const values = Array.isArray(type) ? type : [type];
+    return values
+        .flatMap((value) => String(value ?? "").split(/[|,]/))
+        .map((value) => value.trim().toUpperCase())
+        .filter(Boolean);
+}
+
+function slotTypeIsWildcard(type) {
+    const values = slotTypeValues(type);
+    return !values.length || values.some((value) => value === "*" || value === "ANY" || value === "WILDCARD");
+}
+
+function slotTypesCompatible(outputType, inputType) {
+    const outputs = slotTypeValues(outputType);
+    const inputs = slotTypeValues(inputType);
+    if (!outputs.length || !inputs.length) return true;
+    if (slotTypeIsWildcard(outputs) || slotTypeIsWildcard(inputs)) return true;
+    return outputs.some((output) => inputs.includes(output));
+}
+
+function graphLinkType(link) {
+    return link?.type ?? link?.[5];
+}
+
+function setGraphLinkType(link, type) {
+    if (!link || type === undefined || type === null || slotTypeIsWildcard(type)) return false;
+    if (graphLinkType(link) === type) return false;
+    link.type = type;
+    if (Array.isArray(link)) link[5] = type;
+    return true;
+}
+
+function installGraphLinkSerializationFallback(link) {
+    if (!link || typeof link !== "object") return 0;
+    let patched = 0;
+    if (typeof link.serialize !== "function") {
+        link.serialize = function () {
+            return [
+                graphLinkId(this),
+                linkOriginId(this),
+                linkOriginSlot(this),
+                linkTargetId(this),
+                linkTargetSlot(this),
+                this.type ?? this[5],
+            ];
+        };
+        patched += 1;
+    }
+    if (typeof link.asSerialisable !== "function") {
+        link.asSerialisable = function () {
+            const data = {
+                id: graphLinkId(this),
+                origin_id: linkOriginId(this),
+                origin_slot: linkOriginSlot(this),
+                target_id: linkTargetId(this),
+                target_slot: linkTargetSlot(this),
+                type: this.type ?? this[5],
+            };
+            if (this.parentId !== undefined) data.parentId = this.parentId;
+            return data;
+        };
+        patched += 1;
+    }
+    if (typeof link.asSerializable !== "function") {
+        link.asSerializable = link.asSerialisable;
+        patched += 1;
+    }
+    if (typeof link.resolve !== "function") {
+        link.resolve = function (graph) {
+            const targetId = linkTargetId(this);
+            const targetSlot = linkTargetSlot(this);
+            const originId = linkOriginId(this);
+            const originSlot = linkOriginSlot(this);
+            const inputNode = targetId === -1 ? undefined : graph?.getNodeById?.(targetId) ?? getGraphNodeById(targetId) ?? undefined;
+            const input = inputNode?.inputs?.[targetSlot];
+            const subgraphInput = originId === -10 ? graph?.inputNode?.slots?.[originSlot] : undefined;
+            if (subgraphInput) return { inputNode, input, subgraphInput, link: this };
+            const outputNode = originId === -1 ? undefined : graph?.getNodeById?.(originId) ?? getGraphNodeById(originId) ?? undefined;
+            const output = outputNode?.outputs?.[originSlot];
+            const subgraphOutput = targetId === -20 ? graph?.outputNode?.slots?.[targetSlot] : undefined;
+            return subgraphOutput
+                ? { outputNode, output, subgraphInput: undefined, subgraphOutput, link: this }
+                : { inputNode, outputNode, input, output, subgraphInput, subgraphOutput, link: this };
+        };
+        patched += 1;
+    }
+    if (typeof link.hasOrigin !== "function") {
+        link.hasOrigin = function (nodeId, slot) {
+            return String(linkOriginId(this)) === String(nodeId) && Number(linkOriginSlot(this)) === Number(slot);
+        };
+        patched += 1;
+    }
+    if (typeof link.hasTarget !== "function") {
+        link.hasTarget = function (nodeId, slot) {
+            return String(linkTargetId(this)) === String(nodeId) && Number(linkTargetSlot(this)) === Number(slot);
+        };
+        patched += 1;
+    }
+    return patched;
+}
+
+function ensureGraphLinksSerializableCompatibility() {
+    let patched = 0;
+    for (const links of [app.graph?._links, app.graph?.links, app.graph?.floatingLinks]) {
+        if (!links) continue;
+        const values = links instanceof Map
+            ? links.values()
+            : Array.isArray(links)
+                ? links
+                : Object.values(links);
+        for (const link of values) patched += installGraphLinkSerializationFallback(link);
+    }
+    for (const reroute of app.graph?.reroutes?.values?.() || []) {
+        if (reroute && typeof reroute.asSerialisable !== "function") {
+            reroute.asSerialisable = function () {
+                return {
+                    id: this.id,
+                    parentId: this.parentId,
+                    pos: Array.isArray(this.pos) ? [this.pos[0], this.pos[1]] : this.pos,
+                    linkIds: [...(this.linkIds || [])],
+                    floating: this.floating ? { slotType: this.floating.slotType } : undefined,
+                };
+            };
+            patched += 1;
+        }
+    }
+    return patched;
 }
 
 function findInputSlot(node, name) {
@@ -1159,6 +1583,12 @@ function findInputSlot(node, name) {
 function findOutputSlot(node, name, fallback = 0) {
     const slot = node?.findOutputSlot?.(name) ?? (node?.outputs || []).findIndex((output) => output.name === name || output.type === name);
     return slot >= 0 ? slot : fallback;
+}
+
+function outputSlotForType(node, type, fallback = 0) {
+    const normalizedType = String(type || "").toUpperCase();
+    const slot = (node?.outputs || []).findIndex((output) => String(output?.type || "").toUpperCase() === normalizedType);
+    return slot >= 0 ? slot : findOutputSlot(node, normalizedType, fallback);
 }
 
 function disconnectInput(node, inputSlot) {
@@ -1205,6 +1635,67 @@ function findOutputReferenceToLink(linkId) {
     return null;
 }
 
+function iterGraphLinks() {
+    const seen = new Set();
+    const values = [];
+    for (const links of [app.graph?._links, app.graph?.links]) {
+        if (!links) continue;
+        const items = links instanceof Map
+            ? links.values()
+            : Array.isArray(links)
+                ? links
+                : Object.values(links);
+        for (const link of items) {
+            const id = graphLinkId(link);
+            const key = String(id ?? values.length);
+            if (seen.has(key)) continue;
+            seen.add(key);
+            values.push(link);
+        }
+    }
+    return values;
+}
+
+function findExistingLinkToInput(targetNode, inputSlot) {
+    for (const link of iterGraphLinks()) {
+        if (String(linkTargetId(link)) === String(targetNode?.id) && Number(linkTargetSlot(link)) === Number(inputSlot)) {
+            installGraphLinkSerializationFallback(link);
+            if (linkCanFeedInput(link, targetNode, inputSlot)) return link;
+        }
+    }
+    return null;
+}
+
+function linkSourceInfo(link) {
+    const source = getGraphNodeById(linkOriginId(link));
+    const outputSlot = linkOriginSlot(link);
+    const output = source?.outputs?.[outputSlot];
+    return { source, outputSlot, output };
+}
+
+function linkCanFeedInput(link, target, inputSlot) {
+    const input = target?.inputs?.[inputSlot];
+    if (!link || !target || !input) return false;
+    const { source, output } = linkSourceInfo(link);
+    if (!source || !output) return false;
+    if (String(linkTargetId(link)) !== String(target.id) || Number(linkTargetSlot(link)) !== Number(inputSlot)) return false;
+    const sourceType = output.type;
+    const declaredType = graphLinkType(link);
+    if (!slotTypeIsWildcard(sourceType) && !slotTypesCompatible(sourceType, input.type)) return false;
+    if (!slotTypeIsWildcard(declaredType) && !slotTypesCompatible(declaredType, input.type)) return false;
+    return true;
+}
+
+function linkFeedsType(link, type) {
+    if (!link) return false;
+    const { source, output } = linkSourceInfo(link);
+    if (!source || !output) return false;
+    const declaredType = graphLinkType(link);
+    if (!slotTypeIsWildcard(output.type)) return slotTypesCompatible(output.type, type);
+    if (!slotTypeIsWildcard(declaredType)) return slotTypesCompatible(declaredType, type);
+    return false;
+}
+
 function writeGraphLink(linkId, source, outputSlot, target, inputSlot, type) {
     if (!app.graph || linkId === undefined || linkId === null || !source || !target) return false;
     const id = Number.isFinite(Number(linkId)) ? Number(linkId) : linkId;
@@ -1216,9 +1707,14 @@ function writeGraphLink(linkId, source, outputSlot, target, inputSlot, type) {
         target_id: target.id,
         target_slot: inputSlot,
     };
-    app.graph.links = app.graph.links || {};
-    app.graph.links[id] = link;
-    if (app.graph._links) app.graph._links[id] = link;
+    installGraphLinkSerializationFallback(link);
+    if (app.graph._links instanceof Map) app.graph._links.set(id, link);
+    else if (app.graph._links) app.graph._links[id] = link;
+    if (app.graph.links instanceof Map) app.graph.links.set(id, link);
+    else {
+        app.graph.links = app.graph.links || {};
+        app.graph.links[id] = link;
+    }
     target.inputs[inputSlot].link = id;
     const output = source.outputs?.[outputSlot];
     if (output) {
@@ -1232,9 +1728,17 @@ function writeGraphLink(linkId, source, outputSlot, target, inputSlot, type) {
 function restoreMissingInputLink(node, inputSlot) {
     const input = node?.inputs?.[inputSlot];
     const linkId = input?.link;
-    if (linkId === undefined || linkId === null || getGraphLink(linkId)) return false;
+    if (linkId === undefined || linkId === null) {
+        const link = findExistingLinkToInput(node, inputSlot);
+        if (!link) return false;
+        input.link = graphLinkId(link);
+        setGraphLinkType(link, input.type);
+        return true;
+    }
+    if (getGraphLink(linkId)) return false;
     const reference = findOutputReferenceToLink(linkId);
     if (!reference) return false;
+    if (!slotTypesCompatible(reference.output?.type, input.type)) return false;
     return writeGraphLink(linkId, reference.source, reference.outputSlot, node, inputSlot, input.type || reference.output?.type);
 }
 
@@ -1242,15 +1746,34 @@ function isWidgetBackedInput(input) {
     return Boolean(input?.widget?.name || input?.widget || input?.type === "INT" || input?.type === "FLOAT" || input?.type === "BOOLEAN" || input?.type === "STRING");
 }
 
+function inputMayNeedConnection(input) {
+    if (!input || input.link !== undefined && input.link !== null) return false;
+    if (isWidgetBackedInput(input)) return false;
+    const type = String(input.type || "").toUpperCase();
+    if (!type || slotTypeIsWildcard(type) || type === "COMBO") return false;
+    if (/optional/i.test(String(input.name || ""))) return false;
+    return ["MODEL", "CLIP", "VAE", "LATENT", "CONDITIONING", "IMAGE", "SEGS", "BBOX_DETECTOR", "CONTROL_NET"].includes(type);
+}
+
 function repairStaleInputLinks() {
-    let repaired = 0;
+    let repaired = repairModelModeBranches();
     for (const graphNode of getGraphNodes()) {
         for (let slot = 0; slot < (graphNode.inputs || []).length; slot += 1) {
             const input = graphNode.inputs[slot];
-            if (input.link === undefined || input.link === null) continue;
+            if (input.link === undefined || input.link === null) {
+                if (inputMayNeedConnection(input) && repairMissingRequiredInput(graphNode, slot)) repaired += 1;
+                continue;
+            }
             const link = getGraphLink(input.link);
-            if (link && String(link?.target_id ?? link?.targetId ?? link?.[3]) === String(graphNode.id)) continue;
+            if (link && linkCanFeedInput(link, graphNode, slot)) {
+                if (slotTypeIsWildcard(linkSourceInfo(link).output?.type)) {
+                    repaired += setGraphLinkType(link, input.type) ? 1 : 0;
+                }
+                continue;
+            }
             if (restoreMissingInputLink(graphNode, slot)) {
+                repaired += 1;
+            } else if (repairMismatchedInputLink(graphNode, slot, link)) {
                 repaired += 1;
             } else if (isWidgetBackedInput(input) && removeInputLinkReference(graphNode, slot)) {
                 repaired += 1;
@@ -1274,6 +1797,8 @@ function repairQueueParentLinkError(error) {
 }
 
 async function submitComfyQueue() {
+    ensureWidgetSerializableCompatibility();
+    ensureGraphLinksSerializableCompatibility();
     if (typeof app.queuePrompt === "function") {
         await app.queuePrompt(0, 1);
         return "已提交生成任务";
@@ -1288,6 +1813,8 @@ function connectNodes(sourceNode, outputSlot, targetNode, inputSlot) {
     if (!sourceNode || !targetNode || outputSlot < 0 || inputSlot < 0) return false;
     disconnectInput(targetNode, inputSlot);
     sourceNode.connect?.(outputSlot, targetNode, inputSlot);
+    const link = getGraphLink(targetNode.inputs?.[inputSlot]?.link);
+    installGraphLinkSerializationFallback(link);
     app.graph?.setDirtyCanvas(true, true);
     return true;
 }
@@ -1390,6 +1917,16 @@ function getNodeWidgetValue(targetNode, widgetName) {
     return getWidget(targetNode, widgetName)?.value;
 }
 
+function ensureWidgetSerializableCompatibility() {
+    let patched = 0;
+    for (const graphNode of getGraphNodes()) {
+        for (const widget of graphNode.widgets || []) {
+            patched += installWidgetSerializationFallback(widget);
+        }
+    }
+    return patched;
+}
+
 function findFirstNode(types) {
     return getGraphNodes().find((graphNode) => types.includes(graphNode.type));
 }
@@ -1404,9 +1941,205 @@ function findBridgeNodes() {
 
 function findModelModeSwitchNode() {
     return getGraphNodes().find((graphNode) => (
-        graphNode.type === "ImpactBoolean" &&
+        /boolean/i.test(`${graphNode.type || ""} ${graphNode.properties?.["Node name for S&R"] || ""}`) &&
         /模型模式|模型来源|分体|anima|model mode|model source|checkpoint/i.test(`${graphNode.title || ""} ${graphNode.properties?.["Node name for S&R"] || ""}`)
     ));
+}
+
+function nodeHasOutputType(graphNode, outputType) {
+    return (graphNode?.outputs || []).some((output) => String(output?.type || "").toUpperCase() === outputType);
+}
+
+function findSplitModelSource(outputType) {
+    const type = String(outputType || "").toUpperCase();
+    const candidates = getGraphNodes().filter((graphNode) => nodeHasOutputType(graphNode, type));
+    const scored = candidates
+        .map((graphNode) => {
+            const text = nodeSearchText(graphNode);
+            let score = 0;
+            if (/anima|qwen_image_vae|qwen/.test(text)) score += 4;
+            if (type === "MODEL" && /unetloader|unet|basev10|diffusion/.test(text)) score += 3;
+            if (type === "CLIP" && /cliploader|text encoder|txt|clip/.test(text)) score += 3;
+            if (type === "VAE" && /vaeloader|vae/.test(text)) score += 3;
+            if (/checkpointloader/.test(text)) score -= 8;
+            return { graphNode, score };
+        })
+        .filter((item) => item.score > 0)
+        .sort((a, b) => b.score - a.score);
+    return scored[0]?.graphNode || null;
+}
+
+function findCheckpointSource(outputType) {
+    const type = String(outputType || "").toUpperCase();
+    const state = app.graph?.__webuiBridgeDirectSwitch;
+    const stored = state?.checkpointNodeId ? getGraphNodeById(state.checkpointNodeId) : null;
+    const candidates = [
+        stored,
+        ...findCheckpointLoaderNodes().filter((graphNode) => /Prompt Bridge Direct Checkpoint/i.test(graphNode.title || "")),
+        ...findCheckpointLoaderNodes(),
+    ].filter(Boolean);
+    return candidates.find((graphNode) => nodeHasOutputType(graphNode, type)) || null;
+}
+
+function findBestSourceForType(outputType, mode = "auto") {
+    const type = String(outputType || "").toUpperCase();
+    const splitSource = ["MODEL", "CLIP", "VAE"].includes(type) ? findSplitModelSource(type) : null;
+    const checkpointSource = ["MODEL", "CLIP", "VAE"].includes(type) ? findCheckpointSource(type) : null;
+    if (mode === "split") return splitSource || checkpointSource;
+    if (mode === "checkpoint") return checkpointSource || splitSource;
+    if (currentModelMode() === false) return checkpointSource || splitSource;
+    return splitSource || checkpointSource || getGraphNodes().find((graphNode) => nodeHasOutputType(graphNode, type)) || null;
+}
+
+function nodeWidgetTextValues(graphNode) {
+    return (graphNode?.widgets || [])
+        .map((widget) => String(widget?.value ?? widget ?? ""))
+        .filter(Boolean);
+}
+
+function findGetNodeByKey(outputType, keys = []) {
+    const type = String(outputType || "").toUpperCase();
+    const keyList = keys.map((key) => String(key || "").toLowerCase()).filter(Boolean);
+    const candidates = getGraphNodes().filter((graphNode) => graphNode.type === "GetNode" && nodeHasOutputType(graphNode, type));
+    if (!keyList.length) return candidates[0] || null;
+    for (const key of keyList) {
+        const found = candidates.find((graphNode) => nodeWidgetTextValues(graphNode).join(" ").toLowerCase().includes(key));
+        if (found) return found;
+    }
+    return null;
+}
+
+function findTypedGetNodeSourceForInput(targetNode, inputSlot, outputType) {
+    const type = String(outputType || "").toUpperCase();
+    const inputName = String(targetNode?.inputs?.[inputSlot]?.name || "").toLowerCase();
+    const text = nodeSearchText(targetNode);
+    if (type === "VAE") return findGetNodeByKey("VAE", ["VAE_3_0"]) || findGetNodeByKey("VAE");
+    if (type === "CLIP") return findGetNodeByKey("CLIP", ["clip_4_1", "CLIP_2_0"]) || findGetNodeByKey("CLIP");
+    if (type === "MODEL") return findGetNodeByKey("MODEL", ["model_4_0", "MODEL_1_0", "__50_0"]) || findGetNodeByKey("MODEL");
+    if (type === "IMAGE") {
+        if (/bboxdetectorsegs|hand bbox/.test(text)) return findGetNodeByKey("IMAGE", ["__18_0", "__14_0", "IMAGE_7_0"]);
+        if (/detailerforeach|hand detailer/.test(text)) return findGetNodeByKey("IMAGE", ["__18_0", "__14_0", "IMAGE_7_0"]);
+        if (/facedetailer|face detailer/.test(text)) return findGetNodeByKey("IMAGE", ["__14_0", "IMAGE_7_0"]);
+        if (/preview|save|final/.test(text)) return findGetNodeByKey("IMAGE", ["__final_output_with_post_resize", "__post_target_mp", "__post_pixel_scale", "__27_0"]);
+        if (inputName.includes("image")) return findGetNodeByKey("IMAGE", ["__18_0", "__14_0", "IMAGE_7_0", "IMAGE_29_0"]);
+    }
+    if (type === "LATENT") return findGetNodeByKey("LATENT", ["LATENT_6_0", "LATENT_5_0"]) || findGetNodeByKey("LATENT");
+    if (type === "CONDITIONING") {
+        if (inputName.includes("negative")) return findGetNodeByKey("CONDITIONING", ["negative_4_3", "__45_0"]);
+        return findGetNodeByKey("CONDITIONING", ["positive_4_2", "__51_0", "__44_0"]) || findGetNodeByKey("CONDITIONING");
+    }
+    return null;
+}
+
+function connectInputToTypedSource(targetNode, inputSlot, outputType, mode = "auto") {
+    const source = findBestSourceForType(outputType, mode);
+    if (!source || String(source.id) === String(targetNode?.id)) return false;
+    const outputSlot = outputSlotForType(source, outputType);
+    if (outputSlot < 0) return false;
+    const connected = connectNodes(source, outputSlot, targetNode, inputSlot);
+    const link = getGraphLink(targetNode?.inputs?.[inputSlot]?.link);
+    if (connected) setGraphLinkType(link, String(outputType || "").toUpperCase());
+    return connected;
+}
+
+function conditionalBranchLooksLikeType(graphNode, outputType) {
+    if (!/conditionalbranch/i.test(String(graphNode?.type || ""))) return false;
+    const type = String(outputType || "").toUpperCase();
+    if (nodeSearchText(graphNode).includes(type.toLowerCase())) return true;
+    for (const output of graphNode.outputs || []) {
+        for (const linkId of output.links || []) {
+            const link = getGraphLink(linkId);
+            const target = getGraphNodeById(linkTargetId(link));
+            const input = target?.inputs?.[linkTargetSlot(link)];
+            if (input && slotTypesCompatible(type, input.type)) return true;
+        }
+    }
+    return false;
+}
+
+function repairConditionalBranchForType(graphNode, outputType) {
+    const type = String(outputType || "").toUpperCase();
+    if (!conditionalBranchLooksLikeType(graphNode, type)) return 0;
+    let repaired = 0;
+    const trueSlot = findInputSlot(graphNode, "tt_value");
+    const falseSlot = findInputSlot(graphNode, "ff_value");
+    const trueLink = getGraphLink(graphNode.inputs?.[trueSlot]?.link);
+    const falseLink = getGraphLink(graphNode.inputs?.[falseSlot]?.link);
+    if (trueSlot >= 0 && !linkFeedsType(trueLink, type) && connectInputToTypedSource(graphNode, trueSlot, type, "split")) repaired += 1;
+    if (falseSlot >= 0 && !linkFeedsType(falseLink, type) && connectInputToTypedSource(graphNode, falseSlot, type, "checkpoint")) repaired += 1;
+    for (const output of graphNode.outputs || []) {
+        for (const linkId of output.links || []) {
+            const link = getGraphLink(linkId);
+            const target = getGraphNodeById(linkTargetId(link));
+            const input = target?.inputs?.[linkTargetSlot(link)];
+            if (input && slotTypesCompatible(type, input.type)) repaired += setGraphLinkType(link, type) ? 1 : 0;
+        }
+    }
+    return repaired;
+}
+
+function repairModelModeBranches() {
+    let repaired = 0;
+    for (const graphNode of getGraphNodes()) {
+        repaired += repairConditionalBranchForType(graphNode, "VAE");
+    }
+    return repaired;
+}
+
+function repairMismatchedInputLink(graphNode, inputSlot, link) {
+    const input = graphNode?.inputs?.[inputSlot];
+    const inputType = String(input?.type || "").toUpperCase();
+    if (!inputType || slotTypeIsWildcard(inputType)) return false;
+    const { source, output } = linkSourceInfo(link);
+    if (source && repairConditionalBranchForType(source, inputType)) {
+        setGraphLinkType(link, inputType);
+        if (linkCanFeedInput(link, graphNode, inputSlot)) return true;
+    }
+    if (source && slotTypeIsWildcard(output?.type) && setGraphLinkType(link, inputType) && linkCanFeedInput(link, graphNode, inputSlot)) return true;
+    if (["MODEL", "CLIP", "VAE"].includes(inputType)) return connectInputToTypedSource(graphNode, inputSlot, inputType);
+    return false;
+}
+
+function connectInputToGetNodeSource(targetNode, inputSlot, outputType) {
+    const source = findTypedGetNodeSourceForInput(targetNode, inputSlot, outputType);
+    if (!source || String(source.id) === String(targetNode?.id)) return false;
+    const outputSlot = outputSlotForType(source, outputType);
+    if (outputSlot < 0) return false;
+    const connected = connectNodes(source, outputSlot, targetNode, inputSlot);
+    const link = getGraphLink(targetNode?.inputs?.[inputSlot]?.link);
+    if (connected) setGraphLinkType(link, String(outputType || "").toUpperCase());
+    return connected;
+}
+
+function repairMissingRequiredInput(graphNode, inputSlot) {
+    const input = graphNode?.inputs?.[inputSlot];
+    const inputType = String(input?.type || "").toUpperCase();
+    if (!inputType || slotTypeIsWildcard(inputType)) return false;
+    if (restoreMissingInputLink(graphNode, inputSlot)) return true;
+    if (["MODEL", "CLIP", "VAE"].includes(inputType)) {
+        return connectInputToGetNodeSource(graphNode, inputSlot, inputType) || connectInputToTypedSource(graphNode, inputSlot, inputType);
+    }
+    if (["IMAGE", "LATENT", "CONDITIONING"].includes(inputType)) return connectInputToGetNodeSource(graphNode, inputSlot, inputType);
+    return false;
+}
+
+function connectBridgeToSplitSources() {
+    const modelSource = findSplitModelSource("MODEL");
+    const clipSource = findSplitModelSource("CLIP");
+    const vaeSource = findSplitModelSource("VAE");
+    let changed = 0;
+    for (const bridgeNode of findBridgeNodes()) {
+        const modelSlot = findInputSlot(bridgeNode, "model");
+        const clipSlot = findInputSlot(bridgeNode, "clip");
+        if (modelSource && modelSlot >= 0 && connectNodes(modelSource, findOutputSlot(modelSource, "MODEL"), bridgeNode, modelSlot)) changed += 1;
+        if (clipSource && clipSlot >= 0 && connectNodes(clipSource, findOutputSlot(clipSource, "CLIP"), bridgeNode, clipSlot)) changed += 1;
+    }
+    if (vaeSource) {
+        for (const target of findVaeTargetsForDirectSwitch()) {
+            if (connectNodes(vaeSource, findOutputSlot(vaeSource, "VAE"), target.node, target.slot)) changed += 1;
+        }
+    }
+    return changed;
 }
 
 function hasSplitAnimaModelSource() {
@@ -1528,9 +2261,10 @@ function restoreDirectSplitModelMode() {
     for (const captured of [...state.bridgeInputs, ...state.vaeInputs]) {
         if (restoreCapturedLink(captured)) changed += 1;
     }
+    if (!changed) changed = connectBridgeToSplitSources();
     return {
         changed: changed > 0,
-        message: changed ? "已切回分体 Anima/Qwen 模式" : "当前工作流没有可恢复的分体模型接线",
+        message: changed ? "已切回分体 Anima/Qwen 模式" : "未找到可接回的 Anima UNET / Text Encoder / VAE 节点",
     };
 }
 
@@ -2244,7 +2978,7 @@ function applyGenerationParameters(parameters) {
     return changed;
 }
 
-function createPromptRow(label, value, placeholder, onFocus, onInput) {
+function createPromptRow(label, value, placeholder, onFocus, onInput, options = {}) {
     const textarea = el("textarea", {
         spellcheck: "false",
         placeholder,
@@ -2253,13 +2987,83 @@ function createPromptRow(label, value, placeholder, onFocus, onInput) {
     });
     textarea.value = value || "";
     const counter = el("div", { class: "webui-bridge-token-counter" }, "0/75");
-    const row = el("div", { class: "webui-bridge-prompt-row" }, [
-        el("div", { class: "webui-bridge-prompt-label" }, label),
+    const baseKey = String(label || "prompt").toLowerCase().replace(/\W+/g, "-");
+    const textareaHeightKey = options.textareaHeightKey || `webui-bridge-textarea-height-${baseKey}`;
+    const chipHeightKey = options.sizeKey || `webui-bridge-chip-height-${baseKey}`;
+    const collapseKey = options.collapseKey || `webui-bridge-collapse-${String(label || "prompt").toLowerCase().replace(/\W+/g, "-")}`;
+    const chips = el("div", { class: "webui-bridge-prompt-chips empty" });
+    textarea.__webuiBridgeHeightKey = textareaHeightKey;
+    textarea.__webuiBridgeMinHeight = 48;
+    textarea.__webuiBridgeMaxHeight = 520;
+    chips.__webuiBridgeHeightKey = chipHeightKey;
+    chips.__webuiBridgeMinHeight = PROMPT_CHIPS_MIN_HEIGHT;
+    chips.__webuiBridgeMaxHeight = 520;
+    applyStoredHeight(textarea, textareaHeightKey, { min: 48, max: 520 });
+    applyStoredHeight(chips, chipHeightKey, { min: PROMPT_CHIPS_MIN_HEIGHT, max: 520 });
+    const resetButton = el("button", {
+        class: "webui-bridge-prompt-label-btn",
+        title: "恢复这个提示词窗口的默认高度",
+        onclick: () => {
+            clearLocalValue(textareaHeightKey);
+            clearLocalValue(chipHeightKey);
+            textarea.style.height = "";
+            textarea.style.flex = "";
+            chips.style.height = "";
+            chips.style.flex = "";
+        },
+    }, "↺");
+    const labelTools = [resetButton];
+    let collapsed = options.collapsible ? readLocalBoolean(collapseKey, false) : false;
+    let collapseButton = null;
+    let row = null;
+    let textChipGrip = null;
+    let chipBottomGrip = null;
+    const applyCollapsedState = (nextCollapsed) => {
+        collapsed = Boolean(nextCollapsed);
+        row?.classList.toggle("collapsed", collapsed);
+        const prompts = row?.closest(".webui-bridge-prompts");
+        prompts?.classList.toggle("negative-collapsed", collapsed);
+        applyTopRowCollapsedState(prompts?.closest(".webui-bridge-toprow"), collapsed);
+        if (row) row.style.maxHeight = collapsed ? "42px" : "";
+        if (collapseButton) collapseButton.textContent = collapsed ? "展开" : "折叠";
+        for (const part of [textarea, chips, textChipGrip, chipBottomGrip, counter]) {
+            if (part) part.style.display = collapsed ? "none" : "";
+        }
+    };
+    if (options.collapsible) {
+        collapseButton = el("button", {
+            class: "webui-bridge-prompt-label-btn",
+            title: "折叠/展开这个提示词区域",
+            onclick: () => {
+                applyCollapsedState(!collapsed);
+                writeLocalBoolean(collapseKey, collapsed);
+            },
+        }, collapsed ? "展开" : "折叠");
+        labelTools.unshift(collapseButton);
+    }
+    textChipGrip = createHeightSplitGrip(textarea, chips, textareaHeightKey, chipHeightKey, {
+        beforeMin: 48,
+        beforeMax: 520,
+        afterMin: PROMPT_CHIPS_MIN_HEIGHT,
+        afterMax: 520,
+        title: "上下拖动分配文本框和已输入 tag 区高度，双击恢复",
+    });
+    chipBottomGrip = createHeightResizeGrip(chips, chipHeightKey, { min: PROMPT_CHIPS_MIN_HEIGHT, max: 520, title: "拖动调整已输入 tag 区底边高度，双击恢复" });
+    row = el("div", { class: "webui-bridge-prompt-row" }, [
+        el("div", { class: "webui-bridge-prompt-label" }, [
+            el("span", {}, label),
+            el("span", { class: "webui-bridge-prompt-label-tools" }, labelTools),
+        ]),
         textarea,
-        el("div", { class: "webui-bridge-prompt-chips empty" }),
+        textChipGrip,
+        chips,
+        chipBottomGrip,
         counter,
     ]);
-    row.chips = row.querySelector(".webui-bridge-prompt-chips");
+    applyCollapsedState(collapsed);
+    row.chips = chips;
+    row.__webuiBridgeBottomResizeTarget = () => chips.classList.contains("empty") ? textarea : chips;
+    row.__webuiBridgeBottomResizeKey = () => chips.classList.contains("empty") ? textareaHeightKey : chipHeightKey;
     return { row, textarea, counter };
 }
 
@@ -2352,6 +3156,8 @@ function createTagButton(tag, textarea, sync, rerender, isNegative = false, stat
             title: "从收藏中移除",
             onclick: async (event) => {
                 event.stopPropagation();
+                event.preventDefault();
+                if (!confirm("只删除这个收藏项？")) return;
                 const kind = isNegative ? "negative" : "positive";
                 const result = await updatePromptAllInOneStorage("delete_favorite", kind, prompt, "", tag.id);
                 await refreshFavoritesFromResult(state, result);
@@ -2361,7 +3167,7 @@ function createTagButton(tag, textarea, sync, rerender, isNegative = false, stat
     }
     const button = el("button", {
         class: "webui-bridge-aio-tag",
-        title: label && label !== prompt ? `${label}\n${prompt}` : prompt,
+        title: [label && label !== prompt ? label : "", tag.name && tag.name !== label ? tag.name : "", prompt].filter(Boolean).join("\n"),
         onclick: async () => {
             await updatePromptAreaWithLoraKeywords(textarea, prompt, isNegative, sync);
             rerender?.();
@@ -2387,8 +3193,19 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
     ]);
     const query = el("input", { class: "webui-bridge-aio-new", placeholder: "请输入新关键词" });
     const autoLoad = el("input", { type: "checkbox", checked: "checked", title: "自动加载提示词" });
-    const autoTranslate = el("input", { type: "checkbox", checked: "checked", title: "自动翻译为 Anima 英文 tag" });
+    const translateStorageKey = `webui-bridge-aio-auto-translate-${kind}`;
+    const autoTranslate = el("input", {
+        type: "checkbox",
+        title: "自动把中文输入翻译为 Anima 英文 tag；未命中本地词库时会保留原文",
+    });
+    autoTranslate.checked = readLocalBoolean(translateStorageKey, true);
+    autoTranslate.addEventListener("change", () => writeLocalBoolean(translateStorageKey, autoTranslate.checked));
     const showInput = el("input", { type: "checkbox", title: "显示默认输入框" });
+    const panelHeightKey = `webui-bridge-aio-panel-height-${kind}`;
+    root.__webuiBridgeHeightKey = panelHeightKey;
+    root.__webuiBridgeMinHeight = kind === "negative" ? 110 : 130;
+    root.__webuiBridgeMaxHeight = 680;
+    applyStoredHeight(root, panelHeightKey, { min: kind === "negative" ? 110 : 130, max: 680 });
     const toggles = el("div", { class: "webui-bridge-aio-toggles" }, [
         autoLoad,
         autoTranslate,
@@ -2473,6 +3290,38 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
         title,
         onclick,
     }, text);
+    const showPromptSettings = () => {
+        const mask = el("div", { class: "webui-bridge-config-mask" });
+        const close = () => mask.remove();
+        const autoTranslateSetting = el("input", { type: "checkbox" });
+        autoTranslateSetting.checked = autoTranslate.checked;
+        autoTranslateSetting.addEventListener("change", () => {
+            autoTranslate.checked = autoTranslateSetting.checked;
+            writeLocalBoolean(translateStorageKey, autoTranslate.checked);
+        });
+        mask.addEventListener("mousedown", (event) => {
+            if (event.target === mask) close();
+        });
+        mask.append(el("div", { class: "webui-bridge-config-panel webui-bridge-prompt-settings" }, [
+            el("div", { class: "webui-bridge-config-head" }, [
+                el("span", {}, `${title}设置`),
+                el("button", { type: "button", onclick: close }, "×"),
+            ]),
+            el("div", { class: "webui-bridge-config-body" }, [
+                el("label", { class: "webui-bridge-config-check" }, [
+                    autoTranslateSetting,
+                    el("span", {}, "自动翻译中文输入"),
+                ]),
+                el("div", { class: "webui-bridge-config-note" }, "“未匹配本地关键词组，保留原文”表示本地 Prompt-all-in-one 词库没有这段中文的映射；不是生成错误。可以换成更短的词、点“英”做整段翻译，或在收藏/词库里补充本地关键词。"),
+                el("div", { class: "webui-bridge-config-note" }, "Prompt 文本框、已输入 tag 区、收藏/标签列表和 Extra Networks 边界都有细拖拽条；上下拖动会自动分配相邻区域高度，双击恢复默认。"),
+                el("div", { class: "webui-bridge-config-note" }, "Negative prompt 右侧可以折叠反向词区域，适合只管理正向提示词时腾出空间。"),
+            ]),
+            el("div", { class: "webui-bridge-config-actions" }, [
+                el("button", { type: "button", class: "primary", onclick: close }, "完成"),
+            ]),
+        ]));
+        document.body.append(mask);
+    };
     const translateAll = async () => {
         const value = textarea.value.trim();
         if (!value) return;
@@ -2481,7 +3330,7 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
             setTextareaValue(textarea, translated.prompt || value);
             hint.textContent = translated.matched
                 ? `已翻译 ${translated.matched} 个关键词`
-                : "未匹配本地关键词组，保留原文";
+                : "本地词库未匹配，已保留原文；可在设置里查看说明";
             sync();
             render();
         } catch (error) {
@@ -2524,6 +3373,7 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
     };
     promptTools.append(
         toolButton("英", "整段翻译为 Anima 英文 tag", translateAll),
+        toolButton("⚙", "提示词管理设置 / 翻译说明", showPromptSettings),
         toolButton("⧉", "复制提示词", copyPrompt),
         toolButton("↥", "保存到历史", saveHistory),
         toolButton("↧", "加载最近历史", loadLatestHistory),
@@ -2534,7 +3384,16 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
         el("div", { class: "webui-bridge-aio-title" }, title),
         el("div", { class: "webui-bridge-aio-actions" }, [promptTools, toggles]),
     );
-    root.append(header, tabs, subTabs, appendRow, body, hint, colorRow);
+    root.append(
+        header,
+        tabs,
+        subTabs,
+        appendRow,
+        body,
+        hint,
+        colorRow,
+        createHeightResizeGrip(root, panelHeightKey, { min: kind === "negative" ? 110 : 130, max: 680, title: "拖动调整收藏/标签列表高度，双击恢复" }),
+    );
 
     let groups = [];
     let activeGroup = 0;
@@ -2573,7 +3432,11 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
             type: "extraNetworks",
             groups: [{
                 name: "Lora",
-                tags: state.loras.map((item) => ({ prompt: item.prompt, local: item.alias })),
+                tags: state.loras.map((item) => ({
+                    prompt: item.prompt,
+                    local: loraDisplayName(item),
+                    name: item.name,
+                })),
             }],
         };
         const sourceGroups = (state.promptAllInOne?.group_tags || []).filter((group) => {
@@ -2732,6 +3595,8 @@ function buildPanel(node) {
 
     const scheduleAutoTranslateInput = (textarea) => {
         if (!textarea || textarea.__webuiBridgeAutoTranslating || textarea.__webuiBridgeComposing) return;
+        const kind = textarea.__webuiBridgeKind || "positive";
+        if (!readLocalBoolean(`webui-bridge-aio-auto-translate-${kind}`, true)) return;
         if (!/[\u3400-\u9fff]/.test(textarea.value || "")) return;
         window.clearTimeout(textarea.__webuiBridgeAutoTranslateTimer);
         textarea.__webuiBridgeAutoTranslateTimer = window.setTimeout(async () => {
@@ -2772,14 +3637,18 @@ function buildPanel(node) {
         "Prompt\nCtrl+Up/Down edits attention, Alt+Left/Right moves comma tags",
         onFocus,
         onInput,
+        { sizeKey: "webui-bridge-chip-size-positive" },
     );
+    positive.textarea.__webuiBridgeKind = "positive";
     const negative = createPromptRow(
         "Negative prompt",
         negativeWidget?.value,
         "Negative prompt",
         onFocus,
         onInput,
+        { sizeKey: "webui-bridge-chip-size-negative", collapseKey: "webui-bridge-negative-collapsed", collapsible: true },
     );
+    negative.textarea.__webuiBridgeKind = "negative";
     state.activeTextarea = positive.textarea;
     positive.row.classList.add("active");
     for (const textarea of [positive.textarea, negative.textarea]) {
@@ -3150,7 +4019,7 @@ function buildPanel(node) {
             };
             const card = el("div", {
                 class: "webui-bridge-card",
-                title: item.name,
+                title: [displayName, item.name !== displayName ? item.name : "", folderLabel && folderLabel !== "Root" ? folderLabel : ""].filter(Boolean).join("\n"),
                 role: "button",
                 tabindex: "0",
                 onclick: async () => {
@@ -3200,7 +4069,7 @@ function buildPanel(node) {
                 el("span", { class: "webui-bridge-card-actions" }, [
                     el("span", { class: "webui-bridge-card-name" }, displayName),
                     el("span", { class: "webui-bridge-card-category", title: categorySource }, categoryLabel),
-                    el("span", { class: "webui-bridge-card-folder" }, folderLabel),
+                    el("span", { class: "webui-bridge-card-folder", title: item.name }, folderLabel),
                     item.description ? el("span", { class: "webui-bridge-card-desc" }, item.description) : null,
                 ]),
             ]);
@@ -3491,57 +4360,125 @@ function buildPanel(node) {
     const resizeGrip = el("div", { class: "webui-bridge-resize-grip", title: "Drag to resize this node" }, "↘");
     installResizeDrag(resizeGrip);
 
+    const promptRowBottomTarget = (row) => row.__webuiBridgeBottomResizeTarget?.() || row;
+    const promptRowBottomKey = (row) => row.__webuiBridgeBottomResizeKey?.() || row.__webuiBridgeHeightKey || "";
+    const promptsColumn = el("div", { class: "webui-bridge-prompts" }, [
+        positive.row,
+        createHeightSplitGrip(
+            () => promptRowBottomTarget(positive.row),
+            positiveTagPanel,
+            () => promptRowBottomKey(positive.row),
+            () => positiveTagPanel.__webuiBridgeHeightKey,
+            {
+                beforeMin: () => promptRowBottomTarget(positive.row).__webuiBridgeMinHeight || 48,
+                beforeMax: () => promptRowBottomTarget(positive.row).__webuiBridgeMaxHeight || 520,
+                afterMin: () => positiveTagPanel.__webuiBridgeMinHeight,
+                afterMax: () => positiveTagPanel.__webuiBridgeMaxHeight,
+                title: "上下拖动分配提示词区和标签列表高度，双击恢复",
+            },
+        ),
+        positiveTagPanel,
+        createHeightSplitGrip(
+            positiveTagPanel,
+            negative.textarea,
+            () => positiveTagPanel.__webuiBridgeHeightKey,
+            () => negative.textarea.__webuiBridgeHeightKey,
+            {
+                className: "webui-bridge-negative-main-resizer",
+                beforeMin: () => positiveTagPanel.__webuiBridgeMinHeight,
+                beforeMax: () => positiveTagPanel.__webuiBridgeMaxHeight,
+                afterMin: () => negative.textarea.__webuiBridgeMinHeight,
+                afterMax: () => negative.textarea.__webuiBridgeMaxHeight,
+                title: "上下拖动分配标签列表和反向词文本框高度，双击恢复",
+            },
+        ),
+        negative.row,
+        createHeightSplitGrip(
+            () => promptRowBottomTarget(negative.row),
+            negativeTagPanel,
+            () => promptRowBottomKey(negative.row),
+            () => negativeTagPanel.__webuiBridgeHeightKey,
+            {
+                className: "webui-bridge-negative-detail-resizer",
+                beforeMin: () => promptRowBottomTarget(negative.row).__webuiBridgeMinHeight || 48,
+                beforeMax: () => promptRowBottomTarget(negative.row).__webuiBridgeMaxHeight || 520,
+                afterMin: () => negativeTagPanel.__webuiBridgeMinHeight,
+                afterMax: () => negativeTagPanel.__webuiBridgeMaxHeight,
+                title: "上下拖动分配反向词区和反向标签列表高度，双击恢复",
+            },
+        ),
+        negativeTagPanel,
+    ]);
+    promptsColumn.classList.toggle("negative-collapsed", negative.row.classList.contains("collapsed"));
+    const topRowHeightKey = "webui-bridge-toprow-height";
+    const extraHeightKey = "webui-bridge-extra-height";
+    const extraSection = el("div", { class: "webui-bridge-extra webui-bridge-extra-compact" }, [
+        el("div", { class: "webui-bridge-extra-head" }, [
+            el("span", {}, "Extra Networks"),
+            networkControls,
+        ]),
+        el("div", { class: "webui-bridge-extra-body" }, [
+            networkTree,
+            networkPane,
+        ]),
+    ]);
+    extraSection.__webuiBridgeHeightKey = extraHeightKey;
+    extraSection.__webuiBridgeMinHeight = 220;
+    extraSection.__webuiBridgeMaxHeight = 760;
+
+    const topRow = el("div", { class: "webui-bridge-toprow" }, [
+        promptsColumn,
+        el("div", { class: "webui-bridge-action-column" }, [
+            el("button", { class: "webui-bridge-generate", title: "Queue Prompt", onclick: queuePrompt }, "Generate"),
+            status,
+            modelSwitchControls,
+            animaModeControls,
+            sizeControls,
+            toolbar,
+            el("div", { class: "webui-bridge-backend-settings" }, [
+                el("button", {
+                    class: "webui-bridge-config-button",
+                    type: "button",
+                    title: "只填写 WebUI 根目录，自动接入 Prompt All in One、TagComplete、styles、LoRA 和模型目录",
+                    onclick: showWebUIIntegrationDialog,
+                }, "一键接入 WebUI"),
+                el("label", {}, [
+                    el("span", {}, "CLIP"),
+                    clipStrengthInput,
+                ]),
+                el("label", {}, [
+                    failOnMissingInput,
+                    el("span", {}, "Missing LoRA stops"),
+                ]),
+            ]),
+            el("div", { class: "webui-bridge-style-row" }, [
+                styleSelect,
+                el("div", { class: "webui-bridge-style-edit" }, [
+                    styleName,
+                    createToolButton("+", "Save current prompts as style", saveStyle),
+                    createToolButton("-", "Delete selected style", deleteStyle),
+                ]),
+            ]),
+        ]),
+    ]);
+    topRow.__webuiBridgeHeightKey = topRowHeightKey;
+    topRow.__webuiBridgeMinHeight = 300;
+    topRow.__webuiBridgeMaxHeight = 980;
+    applyStoredHeight(topRow, topRowHeightKey, { min: 300, max: 980 });
+    applyTopRowCollapsedState(topRow, negative.row.classList.contains("collapsed"));
+
     const panel = el("div", { class: "webui-bridge-panel" }, [
-        el("div", { class: "webui-bridge-toprow" }, [
-            el("div", { class: "webui-bridge-prompts" }, [
-                positive.row,
-                positiveTagPanel,
-                negative.row,
-                negativeTagPanel,
-            ]),
-            el("div", { class: "webui-bridge-action-column" }, [
-                el("button", { class: "webui-bridge-generate", title: "Queue Prompt", onclick: queuePrompt }, "Generate"),
-                status,
-                modelSwitchControls,
-                animaModeControls,
-                sizeControls,
-                toolbar,
-                el("div", { class: "webui-bridge-backend-settings" }, [
-                    el("button", {
-                        class: "webui-bridge-config-button",
-                        type: "button",
-                        title: "只填写 WebUI 根目录，自动接入 Prompt All in One、TagComplete、styles、LoRA 和模型目录",
-                        onclick: showWebUIIntegrationDialog,
-                    }, "一键接入 WebUI"),
-                    el("label", {}, [
-                        el("span", {}, "CLIP"),
-                        clipStrengthInput,
-                    ]),
-                    el("label", {}, [
-                        failOnMissingInput,
-                        el("span", {}, "Missing LoRA stops"),
-                    ]),
-                ]),
-                el("div", { class: "webui-bridge-style-row" }, [
-                    styleSelect,
-                    el("div", { class: "webui-bridge-style-edit" }, [
-                        styleName,
-                        createToolButton("+", "Save current prompts as style", saveStyle),
-                        createToolButton("-", "Delete selected style", deleteStyle),
-                    ]),
-                ]),
-            ]),
-        ]),
-        el("div", { class: "webui-bridge-extra webui-bridge-extra-compact" }, [
-            el("div", { class: "webui-bridge-extra-head" }, [
-                el("span", {}, "Extra Networks"),
-                networkControls,
-            ]),
-            el("div", { class: "webui-bridge-extra-body" }, [
-                networkTree,
-                networkPane,
-            ]),
-        ]),
+        topRow,
+        createHeightSplitGrip(topRow, extraSection, () => topRow.classList.contains("negative-collapsed") ? "" : topRowHeightKey, extraHeightKey, {
+            className: "webui-bridge-panel-splitter",
+            beforeMin: () => topRow.classList.contains("negative-collapsed") ? 64 : 300,
+            beforeMax: 980,
+            afterMin: 220,
+            afterMax: 760,
+            fillAfter: true,
+            title: "上下拖动分配提示词区域和 Extra Networks 高度，双击恢复",
+        }),
+        extraSection,
         resizeGrip,
     ]);
     networkPane.append(cards);
@@ -3671,6 +4608,7 @@ function installWebUIPanel(node) {
         getMinHeight: () => 420,
         getMaxHeight: () => 100000,
     });
+    installWidgetSerializationFallback(domWidget, () => null);
     if (Array.isArray(node.widgets)) {
         const index = node.widgets.indexOf(domWidget);
         if (index > 0) {
@@ -3678,6 +4616,8 @@ function installWebUIPanel(node) {
             node.widgets.unshift(domWidget);
         }
     }
+    for (const widget of node.widgets || []) installWidgetSerializationFallback(widget);
+    ensureGraphLinksSerializableCompatibility();
     domWidget.y = 0;
     domWidget.last_y = 0;
     const applyDomWidgetSize = (nodeWidth, nodeHeight) => {
@@ -3777,6 +4717,31 @@ function addStyles() {
         .webui-bridge-resize-grip:hover {
             border-color: #6aa3ff;
             background: #30394a;
+        }
+        .webui-bridge-section-resizer {
+            flex: 0 0 8px;
+            min-height: 8px;
+            cursor: ns-resize;
+            background:
+                linear-gradient(to bottom, rgba(255, 255, 255, 0.02), rgba(0, 0, 0, 0.12)),
+                repeating-linear-gradient(90deg, transparent 0 7px, rgba(134, 156, 190, .32) 7px 9px, transparent 9px 16px);
+            border-top: 1px solid rgba(84, 99, 124, .5);
+            border-bottom: 1px solid rgba(0, 0, 0, .22);
+            box-sizing: border-box;
+            user-select: none;
+        }
+        .webui-bridge-section-resizer:hover {
+            background:
+                linear-gradient(to bottom, rgba(106, 163, 255, 0.14), rgba(20, 47, 82, 0.16)),
+                repeating-linear-gradient(90deg, transparent 0 7px, rgba(156, 194, 255, .72) 7px 9px, transparent 9px 16px);
+        }
+        .webui-bridge-split-resizer {
+            position: relative;
+            z-index: 2;
+        }
+        .webui-bridge-panel-splitter {
+            flex: 0 0 8px;
+            margin: -2px 0;
         }
         .webui-bridge-size-controls {
             display: grid;
@@ -3911,25 +4876,48 @@ function addStyles() {
             max-height: none;
             overflow: hidden;
         }
+        .webui-bridge-toprow.negative-collapsed {
+            align-items: start;
+            flex: 0 0 auto;
+            min-height: 0;
+        }
         .webui-bridge-prompts {
-            display: grid;
-            grid-template-rows: auto minmax(150px, 1.15fr) auto minmax(120px, .85fr);
-            gap: 8px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
             min-width: 0;
             min-height: 0;
             overflow: hidden auto;
+        }
+        .webui-bridge-prompts.negative-collapsed {
+            overflow: visible;
+        }
+        .webui-bridge-prompts.negative-collapsed .webui-bridge-negative-detail-resizer,
+        .webui-bridge-prompts.negative-collapsed .webui-bridge-negative-main-resizer,
+        .webui-bridge-prompts.negative-collapsed .webui-bridge-aio-negative {
+            display: none;
+        }
+        .webui-bridge-prompts.negative-collapsed .webui-bridge-aio-positive {
+            flex: 1 1 auto;
         }
         .webui-bridge-prompt-row {
             position: relative;
             display: flex;
             flex-direction: column;
+            flex: 0 0 auto;
             border: 1px solid #3e4654;
             border-radius: 6px;
             background: #171a20;
             overflow: hidden;
         }
         .webui-bridge-prompt-row.has-chips {
-            min-height: 132px;
+            min-height: 198px;
+        }
+        .webui-bridge-prompt-row.collapsed,
+        .webui-bridge-prompt-row.collapsed.has-chips {
+            min-height: 0 !important;
+            height: auto !important;
+            max-height: 42px !important;
         }
         .webui-bridge-prompt-row.active {
             border-color: #6aa3ff;
@@ -3939,17 +4927,44 @@ function addStyles() {
             box-shadow: 0 0 0 1px rgba(216, 74, 74, .35);
         }
         .webui-bridge-prompt-label {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
             padding: 5px 8px;
             color: #cbd4e1;
             font-size: 12px;
             background: #252a34;
             border-bottom: 1px solid #3e4654;
         }
+        .webui-bridge-prompt-label-tools {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            flex: 0 0 auto;
+        }
+        .webui-bridge-prompt-label-btn {
+            min-width: 24px;
+            height: 22px;
+            padding: 0 6px;
+            border: 1px solid #4b5a70;
+            border-radius: 4px;
+            background: #1c2634;
+            color: #e5eefb;
+            cursor: pointer;
+            font-size: 11px;
+            line-height: 20px;
+        }
+        .webui-bridge-prompt-label-btn:hover {
+            border-color: #79a9ef;
+            background: #263853;
+        }
         .webui-bridge-prompt-row textarea {
             width: 100%;
             flex: 0 0 auto;
+            height: 96px;
             min-height: 48px;
-            max-height: 118px;
+            max-height: none;
             padding: 9px 56px 9px 9px;
             box-sizing: border-box;
             border: 0;
@@ -3965,16 +4980,31 @@ function addStyles() {
         .webui-bridge-prompt-chips {
             display: flex;
             flex: 0 0 auto;
+            align-items: flex-start;
+            align-content: flex-start;
             gap: 8px;
-            padding: 8px 8px 38px;
-            min-height: 56px;
-            max-height: 126px;
+            padding: 8px 8px 56px;
+            height: 104px;
+            min-height: 104px;
+            max-height: none;
             overflow: auto;
             flex-wrap: wrap;
             border-top: 1px solid #2d3542;
             background: #151922;
         }
+        .webui-bridge-prompt-row.collapsed textarea,
+        .webui-bridge-prompt-row.collapsed .webui-bridge-prompt-chips,
+        .webui-bridge-prompt-row.collapsed .webui-bridge-section-resizer,
+        .webui-bridge-prompt-row.collapsed .webui-bridge-token-counter {
+            display: none !important;
+        }
+        .webui-bridge-prompt-row.collapsed + .webui-bridge-aio-negative {
+            display: none;
+        }
         .webui-bridge-prompt-chips.empty {
+            display: none;
+        }
+        .webui-bridge-prompt-chips.empty + .webui-bridge-section-resizer {
             display: none;
         }
         .webui-bridge-prompt-chips.drag-active {
@@ -4072,13 +5102,16 @@ function addStyles() {
         }
         .webui-bridge-chip-tools {
             position: absolute;
-            z-index: 20;
+            z-index: 80;
             left: -1px;
             top: calc(100% + 2px);
             display: none;
             align-items: center;
+            flex-wrap: wrap;
             gap: 2px;
+            max-width: 420px;
             padding: 3px;
+            box-sizing: border-box;
             border: 1px solid #465267;
             border-radius: 4px;
             background: #101620;
@@ -4089,11 +5122,20 @@ function addStyles() {
         .webui-bridge-prompt-chip:hover {
             z-index: 30;
         }
+        .webui-bridge-prompt-chip.tools-up .webui-bridge-chip-tools {
+            top: auto;
+            bottom: calc(100% + 2px);
+        }
+        .webui-bridge-prompt-chip.tools-up::after {
+            top: auto;
+            bottom: 100%;
+        }
         .webui-bridge-prompt-chip.show-tools .webui-bridge-chip-tools,
         .webui-bridge-prompt-chip:hover .webui-bridge-chip-tools {
             display: flex;
         }
         .webui-bridge-chip-tool {
+            flex: 0 0 auto;
             min-width: 21px;
             height: 21px;
             padding: 0 4px;
@@ -4116,6 +5158,7 @@ function addStyles() {
             color: #ffb6b6;
         }
         .webui-bridge-chip-weight {
+            flex: 0 0 46px;
             width: 46px;
             height: 21px;
             box-sizing: border-box;
@@ -4145,17 +5188,17 @@ function addStyles() {
             background: #0d121b;
             overflow: hidden;
             min-height: 0;
-            flex: 1 1 auto;
+            flex: 0 0 auto;
             display: flex;
             flex-direction: column;
         }
         .webui-bridge-aio-positive {
             min-height: 150px;
-            height: auto;
+            height: 190px;
         }
         .webui-bridge-aio-negative {
             min-height: 120px;
-            height: auto;
+            height: 150px;
         }
         .webui-bridge-aio-header {
             display: flex;
@@ -4178,6 +5221,7 @@ function addStyles() {
             justify-content: flex-end;
             gap: 5px;
             min-width: 0;
+            flex-wrap: wrap;
         }
         .webui-bridge-aio-append {
             position: relative;
@@ -4934,9 +5978,6 @@ function addStyles() {
                 flex-basis: auto;
                 max-height: none;
             }
-            .webui-bridge-prompts {
-                grid-template-rows: auto minmax(190px, 1fr) auto minmax(160px, .85fr);
-            }
             .webui-bridge-tools {
                 grid-template-columns: repeat(5, minmax(28px, 1fr));
             }
@@ -5290,6 +6331,24 @@ function addStyles() {
             gap: 7px;
             color: #dce6f5;
             font-weight: 700;
+        }
+        .webui-bridge-config-body label.webui-bridge-config-check {
+            display: flex;
+            grid-template-columns: none;
+            align-items: center;
+            gap: 9px;
+        }
+        .webui-bridge-config-note {
+            padding: 10px 12px;
+            border: 1px solid #33435a;
+            border-radius: 6px;
+            background: #0d121b;
+            color: #b9c9dd;
+            font-size: 12px;
+            line-height: 1.55;
+        }
+        .webui-bridge-prompt-settings .webui-bridge-config-actions {
+            grid-template-columns: 1fr;
         }
         .webui-bridge-config-input {
             width: 100%;

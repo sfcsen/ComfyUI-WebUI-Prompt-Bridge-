@@ -21,13 +21,24 @@ NODE_DIR = Path(__file__).resolve().parent
 DATA_DIR = NODE_DIR / "data"
 LOCAL_CONFIG_PATH = NODE_DIR / "config.local.json"
 PROMPT_ALL_IN_ONE_HISTORY_MAX = 100
+MAX_PROMPT_TEXT_LENGTH = 50000
+MAX_SHORT_TEXT_LENGTH = 2000
+MAX_STYLE_NAME_LENGTH = 120
+MAX_WEBUI_ROOT_LENGTH = 500
 _TAG_AUTOCOMPLETE_CACHE = None
 _LORA_METADATA_CACHE = {}
 _LORA_RAW_METADATA_CACHE = {}
+_LORA_HASH_CACHE = {}
 _TRANSLATION_MAP_CACHE = {}
 _NETWORK_TRANSLATE_CACHE = {}
 _LORA_PREVIEW_EXTENSIONS = (".preview.png", ".preview.jpg", ".preview.jpeg", ".preview.webp", ".png", ".jpg", ".jpeg", ".webp")
 _LORA_DESCRIPTION_EXTENSIONS = (".txt", ".description.txt", ".desc.txt")
+_IMAGE_SIGNATURES = {
+    ".png": (b"\x89PNG\r\n\x1a\n",),
+    ".jpg": (b"\xff\xd8\xff",),
+    ".jpeg": (b"\xff\xd8\xff",),
+    ".webp": (b"RIFF",),
+}
 
 
 def _load_local_config():
@@ -60,10 +71,23 @@ def _first_existing(*paths):
     return None
 
 
+def _truncate_text(value, limit):
+    return str(value or "")[:limit]
+
+
+def _validate_kind(kind):
+    return "negative" if kind == "negative" else "positive"
+
+
+def _looks_like_webui_root(root):
+    return root.is_dir() and (root / "models").is_dir() and ((root / "webui.py").exists() or (root / "launch.py").exists() or (root / "modules").is_dir())
+
+
 def _build_webui_config(webui_root):
-    root = _existing_path(webui_root)
-    if not root or not root.is_dir():
-        raise ValueError("WebUI 根目录不存在，请选择包含 launch.py、webui.py 或 models 文件夹的 WebUI 根目录")
+    root_text = _truncate_text(webui_root, MAX_WEBUI_ROOT_LENGTH)
+    root = _existing_path(root_text)
+    if not root or not _looks_like_webui_root(root):
+        raise ValueError("WebUI 根目录不存在或结构不完整，请选择包含 models 且带 webui.py、launch.py 或 modules 的 WebUI 根目录")
     extensions = root / "extensions"
     detected = _detect_webui_paths(root)
     model_paths = {
@@ -134,7 +158,7 @@ def _apply_webui_model_paths(webui_root):
 
 def _apply_local_config(config):
     global LOCAL_CONFIG, WEBUI_ROOT, PROMPT_ALL_IN_ONE_DIR, TAGCOMPLETE_DIR, WEBUI_PYTHON_SITE_PACKAGES, STORAGE_DIR, STYLES_FILE
-    global _TAG_AUTOCOMPLETE_CACHE, _LORA_METADATA_CACHE, _LORA_RAW_METADATA_CACHE, _TRANSLATION_MAP_CACHE, _NETWORK_TRANSLATE_CACHE
+    global _TAG_AUTOCOMPLETE_CACHE, _LORA_METADATA_CACHE, _LORA_RAW_METADATA_CACHE, _LORA_HASH_CACHE, _TRANSLATION_MAP_CACHE, _NETWORK_TRANSLATE_CACHE
     LOCAL_CONFIG = config if isinstance(config, dict) else {}
     WEBUI_ROOT = _discover_webui_root()
     PROMPT_ALL_IN_ONE_DIR = (
@@ -160,6 +184,7 @@ def _apply_local_config(config):
     _TAG_AUTOCOMPLETE_CACHE = None
     _LORA_METADATA_CACHE.clear()
     _LORA_RAW_METADATA_CACHE.clear()
+    _LORA_HASH_CACHE.clear()
     _TRANSLATION_MAP_CACHE.clear()
     _NETWORK_TRANSLATE_CACHE.clear()
 
@@ -286,6 +311,32 @@ def _read_text_if_exists(path):
     except Exception:
         pass
     return ""
+
+
+def _validate_same_origin_request(request):
+    host = request.headers.get("Host", "").split(",", 1)[0].strip().lower()
+    if not host:
+        return True
+    for header in ("Origin", "Referer"):
+        value = request.headers.get(header, "")
+        if not value:
+            continue
+        match = re.match(r"^https?://([^/]+)", value, flags=re.IGNORECASE)
+        if not match:
+            return False
+        if match.group(1).lower() != host:
+            return False
+    return True
+
+
+def _validate_preview_image(image_bytes, extension):
+    signatures = _IMAGE_SIGNATURES.get(extension)
+    if not signatures:
+        raise ValueError("Unsupported preview image type")
+    if not any(image_bytes.startswith(signature) for signature in signatures):
+        raise ValueError("Preview image content does not match its file type")
+    if extension == ".webp" and image_bytes[8:12] != b"WEBP":
+        raise ValueError("Preview image content does not match its file type")
 
 
 def _load_prompt_all_in_one_group_tags(lang="zh_CN"):
@@ -444,7 +495,6 @@ def _lora_metadata_summary(lora_name):
         "requested": lora_name,
         "name": resolved,
         "found": True,
-        "path": lora_path,
         "base_model": "",
         "network_module": "",
         "architecture": "",
@@ -494,10 +544,42 @@ def _lora_metadata_summary(lora_name):
     return summary
 
 
+def _prompt_all_in_one_item_prompt(item):
+    if not isinstance(item, dict):
+        return ""
+    prompt = item.get("prompt")
+    if prompt:
+        return str(prompt)
+    tags = []
+    for tag in item.get("tags") or []:
+        if not isinstance(tag, dict) or tag.get("disabled"):
+            continue
+        value = tag.get("value")
+        if value:
+            tags.append(str(value))
+    return ", ".join(tags)
+
+
+def _prompt_all_in_one_item_id(item, index):
+    if not isinstance(item, dict):
+        return ""
+    item_id = str(item.get("id") or "").strip()
+    if item_id:
+        return item_id
+    payload = {
+        "index": index,
+        "time": item.get("time"),
+        "name": item.get("name") or "",
+        "prompt": _prompt_all_in_one_item_prompt(item),
+    }
+    digest = hashlib.sha256(json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8")).hexdigest()
+    return f"legacy-{digest[:16]}"
+
+
 def _load_prompt_all_in_one_favorites(kind):
     data = _storage_get(_storage_key("favorite", kind), [])
     items = []
-    for item in data if isinstance(data, list) else []:
+    for index, item in enumerate(data if isinstance(data, list) else []):
         if not isinstance(item, dict):
             continue
         tags = []
@@ -507,10 +589,10 @@ def _load_prompt_all_in_one_favorites(kind):
             value = tag.get("value")
             if value:
                 tags.append({"prompt": str(value), "local": str(tag.get("localValue") or "")})
-        prompt = item.get("prompt") or ", ".join(tag["prompt"] for tag in tags)
+        prompt = _prompt_all_in_one_item_prompt(item) or ", ".join(tag["prompt"] for tag in tags)
         if prompt:
             items.append({
-                "id": item.get("id") or "",
+                "id": _prompt_all_in_one_item_id(item, index),
                 "name": item.get("name") or prompt,
                 "prompt": prompt,
                 "tags": tags or [{"prompt": prompt, "local": item.get("name") or ""}],
@@ -585,9 +667,14 @@ def _webui_network_translate(text, from_lang="zh_CN", to_lang="en_US"):
     if cache_key in _NETWORK_TRANSLATE_CACHE:
         return _NETWORK_TRANSLATE_CACHE[cache_key]
 
+    translate_script = PROMPT_ALL_IN_ONE_DIR / "scripts" / "physton_prompt" / "translate.py"
+    if not translate_script.exists():
+        _NETWORK_TRANSLATE_CACHE[cache_key] = ""
+        return ""
+
     added_paths = []
     import_paths = [PROMPT_ALL_IN_ONE_DIR]
-    if WEBUI_PYTHON_SITE_PACKAGES:
+    if WEBUI_PYTHON_SITE_PACKAGES and WEBUI_ROOT and WEBUI_PYTHON_SITE_PACKAGES.is_relative_to(WEBUI_ROOT):
         import_paths.append(WEBUI_PYTHON_SITE_PACKAGES)
     for raw_path in import_paths:
         path = str(raw_path)
@@ -680,20 +767,25 @@ def _delete_prompt_all_in_one_item(collection, kind, item_id="", prompt=""):
         return False
     item_id = str(item_id or "")
     prompt = str(prompt or "").strip()
-    next_items = []
-    removed = False
-    for item in items:
-        if not isinstance(item, dict):
-            next_items.append(item)
-            continue
-        item_prompt = str(item.get("prompt") or "").strip()
-        if (item_id and str(item.get("id") or "") == item_id) or (prompt and item_prompt == prompt):
-            removed = True
-            continue
-        next_items.append(item)
-    if removed:
-        _storage_set(key, next_items)
-    return removed
+    remove_index = None
+    if item_id:
+        for index, item in enumerate(items):
+            if _prompt_all_in_one_item_id(item, index) == item_id:
+                remove_index = index
+                break
+    elif prompt:
+        matches = [
+            index for index, item in enumerate(items)
+            if _prompt_all_in_one_item_prompt(item).strip() == prompt
+        ]
+        if len(matches) == 1:
+            remove_index = matches[0]
+    if remove_index is None:
+        return False
+    next_items = list(items)
+    del next_items[remove_index]
+    _storage_set(key, next_items)
+    return True
 
 
 def _get_prompt_all_in_one_items(collection, kind):
@@ -1382,11 +1474,19 @@ def _lora_file_hash(lora_path):
     if not lora_path:
         return ""
     try:
+        stat = Path(lora_path).stat()
+        cache_key = (str(lora_path), int(stat.st_mtime), int(stat.st_size))
+        cached = _LORA_HASH_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
         digest = hashlib.sha256()
         with open(lora_path, "rb") as file:
             for chunk in iter(lambda: file.read(1024 * 1024), b""):
                 digest.update(chunk)
-        return digest.hexdigest()[:12]
+        value = digest.hexdigest()[:12]
+        _LORA_HASH_CACHE.clear()
+        _LORA_HASH_CACHE[cache_key] = value
+        return value
     except Exception:
         return ""
 
@@ -1430,14 +1530,14 @@ def _lora_detail(lora_name):
     summary = _lora_metadata_summary(resolved)
     stat = Path(lora_path).stat()
     sd_version = user_metadata.get("sd version") or _detect_lora_sd_version(raw_metadata, summary)
+    lora_hash = _lora_file_hash(lora_path)
     return {
         "requested": lora_name,
         "name": resolved,
         "found": True,
-        "path": lora_path,
         "file_name": Path(lora_path).name,
         "file_size": _pretty_bytes(stat.st_size),
-        "hash": _lora_file_hash(lora_path),
+        "hash": lora_hash,
         "modified": datetime.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
         "thumbnail": f"/webui_prompt_bridge/lora_thumbnail?name={quote(resolved, safe='')}" if preview_path else "",
         "description": user_metadata.get("description") or description,
@@ -1453,7 +1553,7 @@ def _lora_detail(lora_name):
         "metadata_table": [
             {"label": "文件名:", "value": resolved},
             {"label": "文件大小:", "value": _pretty_bytes(stat.st_size)},
-            {"label": "哈希值:", "value": _lora_file_hash(lora_path)},
+            {"label": "哈希值:", "value": lora_hash},
             {"label": "最后修改日期:", "value": datetime.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")},
             {"label": "输出名称:", "value": raw_metadata.get("ss_output_name") or ""},
             {"label": "模型:", "value": raw_metadata.get("ss_sd_model_name") or raw_metadata.get("ss_base_model_version") or ""},
@@ -1577,6 +1677,11 @@ def _register_routes():
         return
     routes = prompt_server.routes
 
+    def reject_cross_origin(request):
+        if _validate_same_origin_request(request):
+            return None
+        return web.json_response({"error": "Cross-origin requests are not allowed"}, status=403)
+
     @routes.get("/webui_prompt_bridge/webui_integration")
     async def webui_integration_get(request):
         return web.json_response({
@@ -1586,8 +1691,11 @@ def _register_routes():
 
     @routes.post("/webui_prompt_bridge/webui_integration")
     async def webui_integration_post(request):
+        rejected = reject_cross_origin(request)
+        if rejected is not None:
+            return rejected
         data = await request.json()
-        root = data.get("webui_root") or data.get("root") or ""
+        root = _truncate_text(data.get("webui_root") or data.get("root") or "", MAX_WEBUI_ROOT_LENGTH)
         if not root and data.get("auto_detect"):
             guesses = _guess_webui_roots()
             root = guesses[0] if guesses else ""
@@ -1735,26 +1843,32 @@ def _register_routes():
 
     @routes.post("/webui_prompt_bridge/lora_user_metadata")
     async def lora_user_metadata_post(request):
+        rejected = reject_cross_origin(request)
+        if rejected is not None:
+            return rejected
         data = await request.json()
-        name = data.get("name", "")
+        name = _truncate_text(data.get("name", ""), MAX_WEBUI_ROOT_LENGTH)
         resolved = _resolve_lora_name(name)
         if not resolved:
             return web.json_response({"error": "LoRA not found"}, status=404)
         lora_path = folder_paths.get_full_path("loras", resolved)
         updates = {
-            "description": data.get("description", ""),
-            "category": data.get("category", ""),
-            "sd version": data.get("sd_version", "Unknown"),
-            "activation text": data.get("activation_text", ""),
+            "description": _truncate_text(data.get("description", ""), MAX_SHORT_TEXT_LENGTH),
+            "category": _truncate_text(data.get("category", ""), MAX_STYLE_NAME_LENGTH),
+            "sd version": _truncate_text(data.get("sd_version", "Unknown"), MAX_STYLE_NAME_LENGTH),
+            "activation text": _truncate_text(data.get("activation_text", ""), MAX_PROMPT_TEXT_LENGTH),
             "preferred weight": data.get("preferred_weight", 0),
-            "negative text": data.get("negative_text", ""),
-            "notes": data.get("notes", ""),
+            "negative text": _truncate_text(data.get("negative_text", ""), MAX_PROMPT_TEXT_LENGTH),
+            "notes": _truncate_text(data.get("notes", ""), MAX_SHORT_TEXT_LENGTH),
         }
         _write_lora_user_metadata(lora_path, updates)
         return web.json_response(_lora_detail(resolved))
 
     @routes.post("/webui_prompt_bridge/lora_preview")
     async def lora_preview_post(request):
+        rejected = reject_cross_origin(request)
+        if rejected is not None:
+            return rejected
         reader = await request.multipart()
         name = ""
         image_bytes = b""
@@ -1762,7 +1876,7 @@ def _register_routes():
         field = await reader.next()
         while field:
             if field.name == "name":
-                name = (await field.text()).strip()
+                name = _truncate_text((await field.text()).strip(), MAX_WEBUI_ROOT_LENGTH)
             elif field.name == "preview":
                 filename = field.filename or ""
                 suffix = Path(filename).suffix.lower()
@@ -1777,6 +1891,10 @@ def _register_routes():
             return web.json_response({"error": "Preview image is required"}, status=400)
         if len(image_bytes) > 20 * 1024 * 1024:
             return web.json_response({"error": "Preview image is too large"}, status=400)
+        try:
+            _validate_preview_image(image_bytes, extension)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
         lora_path = folder_paths.get_full_path("loras", resolved)
         base = Path(lora_path).with_suffix("")
         preview_path = Path(str(base) + f".preview{extension}")
@@ -1808,13 +1926,16 @@ def _register_routes():
 
     @routes.post("/webui_prompt_bridge/prompt_all_in_one/translate")
     async def prompt_all_in_one_translate(request):
+        rejected = reject_cross_origin(request)
+        if rejected is not None:
+            return rejected
         try:
             data = await request.json()
         except Exception:
             data = {}
-        text = data.get("text", "")
-        lang = data.get("lang", "zh_CN")
-        to = data.get("to", "english")
+        text = _truncate_text(data.get("text", ""), MAX_PROMPT_TEXT_LENGTH)
+        lang = _truncate_text(data.get("lang", "zh_CN"), MAX_STYLE_NAME_LENGTH)
+        to = _truncate_text(data.get("to", "english"), MAX_STYLE_NAME_LENGTH)
         translated = _translate_prompt_all_in_one_text(text, to=to, lang=lang)
         prompt = ", ".join(item["prompt"] for item in translated if item["prompt"] != "\n")
         return web.json_response({
@@ -1833,16 +1954,19 @@ def _register_routes():
 
     @routes.post("/webui_prompt_bridge/prompt_all_in_one/storage")
     async def prompt_all_in_one_storage_post(request):
+        rejected = reject_cross_origin(request)
+        if rejected is not None:
+            return rejected
         try:
             data = await request.json()
         except Exception:
             data = {}
         action = data.get("action")
-        kind = data.get("kind", "positive")
-        lang = data.get("lang", "zh_CN")
-        prompt = data.get("prompt", "")
-        name = data.get("name", "")
-        item_id = data.get("id", "")
+        kind = _validate_kind(data.get("kind", "positive"))
+        lang = _truncate_text(data.get("lang", "zh_CN"), MAX_STYLE_NAME_LENGTH)
+        prompt = _truncate_text(data.get("prompt", ""), MAX_PROMPT_TEXT_LENGTH)
+        name = _truncate_text(data.get("name", ""), MAX_STYLE_NAME_LENGTH)
+        item_id = _truncate_text(data.get("id", ""), MAX_STYLE_NAME_LENGTH)
 
         if action == "push_history":
             item = _push_prompt_all_in_one_item("history", kind, prompt, name, lang)
@@ -1880,12 +2004,15 @@ def _register_routes():
 
     @routes.post("/webui_prompt_bridge/styles")
     async def update_styles(request):
+        rejected = reject_cross_origin(request)
+        if rejected is not None:
+            return rejected
         try:
             data = await request.json()
         except Exception:
             data = {}
         action = data.get("action")
-        name = (data.get("name") or "").strip()
+        name = _truncate_text((data.get("name") or "").strip(), MAX_STYLE_NAME_LENGTH)
         if not name:
             return web.json_response({"error": "Style name is required"}, status=400)
 
@@ -1895,8 +2022,8 @@ def _register_routes():
         elif action == "save":
             replacement = {
                 "name": name,
-                "prompt": data.get("prompt", ""),
-                "negative_prompt": data.get("negative_prompt", ""),
+                "prompt": _truncate_text(data.get("prompt", ""), MAX_PROMPT_TEXT_LENGTH),
+                "negative_prompt": _truncate_text(data.get("negative_prompt", ""), MAX_PROMPT_TEXT_LENGTH),
             }
             for index, style in enumerate(styles):
                 if style.get("name") == name:
@@ -1912,11 +2039,14 @@ def _register_routes():
 
     @routes.post("/webui_prompt_bridge/parse_infotext")
     async def parse_infotext(request):
+        rejected = reject_cross_origin(request)
+        if rejected is not None:
+            return rejected
         try:
             data = await request.json()
         except Exception:
             data = {}
-        parsed = _parse_generation_parameters(data.get("text", ""))
+        parsed = _parse_generation_parameters(_truncate_text(data.get("text", ""), MAX_PROMPT_TEXT_LENGTH))
         return web.json_response({"parameters": parsed})
 
 
