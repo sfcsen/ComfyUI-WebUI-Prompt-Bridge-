@@ -3,6 +3,8 @@ __pycache__/
 *.py[cod]
 data/storage/
 data/styles.csv
+data/sd-webui-prompt-all-in-one/
+data/a1111-sd-webui-tagcomplete/
 config.local.json
 .env
 .venv/

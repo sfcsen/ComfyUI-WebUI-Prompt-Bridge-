@@ -15,13 +15,13 @@
 
 新用户可以先从中文最小工作流教程开始：`docs/tutorial-minimal-workflows.md`。教程分别演示 Anima 分体模型和 XL 整合 checkpoint 的最小接线，并配有截图和可直接拖入 ComfyUI 的 JSON 工作流。
 
-## v0.1.7 更新说明
+## v0.1.8 更新说明
 
-这一版重点修复提示词面板的布局体验：Prompt 文本框、已输入 tag 区、Prompt All in One 标签区和 Extra Networks 之间的高度都可以拖动调整；反向提示词折叠后会释放空间，不再留下大块空白；tag 编辑工具条也会自动避开底部面板和右侧滚动条，减少被遮挡的问题。
+这一版重点解决“没有 WebUI 怎么用”的问题。首次打开节点时会出现启动向导，可以选择 `连接 WebUI`、`使用内置数据` 或 `导入词库`；即使电脑里没有 A1111 / Forge WebUI，也能先用内置基础 tag 分类、自动补全、常用反向词和简单中英映射开始写提示词。
 
-使用小技巧：在已输入的提示词 tag 上双击，可以隐藏/禁用这个 tag，再双击可以恢复；被禁用的 tag 不会写入生成提示词。
+如果你已经有 WebUI，并且装过 Prompt All in One / TagComplete，直接 `一键接入 WebUI` 即可，不需要重复下载。只有 WebUI 缺扩展时才需要点 `补齐缺失扩展`；没有 WebUI 的用户可以在 `设置` 里点 `下载本地数据包`，把更完整的词库下载到本节点自己的 `data` 目录。
 
-下一个版本计划增加更详细的设置功能，把翻译、布局、标签显示、LoRA 卡片和本机 WebUI 接入选项整理到更清晰的设置面板里。
+新增的 `设置` 面板可以集中管理数据来源、翻译来源、布局尺寸、Tag 显示方式和 LoRA 卡片大小。已有 WebUI 用户、新用户和只用 ComfyUI 的用户都可以在同一个入口里选合适的使用方式。
 
 完整更新记录见 `CHANGELOG.md`。
 
@@ -205,12 +205,23 @@ https://registry.comfy.org/nodes/comfyui-webui-prompt-bridge
 
 ## 接入本机 WebUI 数据
 
+没有本机 WebUI 也可以先使用节点。首次打开时可以在启动向导里选择 `使用内置数据`，节点会提供基础提示词分类、补全、常用反向词和简单中英映射；也可以选择 `导入词库`，从 JSON / CSV / TSV 导入自己的 tag 映射。
+
+如果你没有 WebUI，但想要更完整的 Prompt All in One / TagComplete 词库，可以在节点右侧点 `设置` -> `下载本地数据包`。节点会把配套数据下载到本插件自己的 `data` 目录，并自动切到可用的数据来源，不需要安装 A1111 或 Forge。
+
 如果你想要更接近 WebUI 的体验，可以连接你本机的 AUTOMATIC1111 WebUI 目录。推荐安装这两个 WebUI 扩展：
 
 - `sd-webui-prompt-all-in-one`
 - `a1111-sd-webui-tagcomplete`
 
 最简单的方法：在节点右侧点击 `一键接入 WebUI`，只选择或填写 WebUI 根目录，例如 `H:/sd-webui-aki-v4.9`。节点会自动接入 `styles.csv`、Prompt All in One、TagComplete、LoRA、checkpoint、VAE、embeddings、ControlNet 等常用数据，不需要用户自己找 CSV 或复制多个路径。
+
+如果你已经有 WebUI，并且 WebUI 里已经装了这两个扩展，不需要下载任何东西，直接 `一键接入 WebUI` 即可。只有 WebUI 缺少扩展时，才需要在 `一键接入 WebUI` 窗口点 `补齐缺失扩展`，或在 `设置` 里点 `补齐 WebUI 扩展`。节点会下载缺失项：
+
+- `https://github.com/Physton/sd-webui-prompt-all-in-one`
+- `https://github.com/DominikDoom/a1111-sd-webui-tagcomplete`
+
+已存在的扩展会自动跳过，不会重复下载。安装到 WebUI 的 `extensions` 后，Bridge 会立即刷新可用词库；如果也想在 WebUI 页面里使用这些扩展，重启一次 WebUI。
 
 ![One-click WebUI auto detection](docs/images/webui-one-click-auto-detect-success.png)
 

@@ -5,9 +5,14 @@ import html
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import time
 import uuid
+import urllib.request
+import zipfile
 from pathlib import Path
 from urllib.parse import quote, unquote
 
@@ -39,6 +44,212 @@ _IMAGE_SIGNATURES = {
     ".jpeg": (b"\xff\xd8\xff",),
     ".webp": (b"RIFF",),
 }
+DEFAULT_BRIDGE_SETTINGS = {
+    "data_source": "auto",
+    "translation_source": "auto",
+    "show_startup_wizard": True,
+    "layout_preset": "default",
+    "tag_display": "local_first",
+    "lora_card_size": "normal",
+}
+_SETTING_CHOICES = {
+    "data_source": {"auto", "webui", "builtin"},
+    "translation_source": {"auto", "webui", "builtin"},
+    "layout_preset": {"default", "compact", "roomy"},
+    "tag_display": {"local_first", "prompt_first", "compact"},
+    "lora_card_size": {"compact", "normal", "large"},
+}
+EXTENSION_ASSETS = {
+    "prompt_all_in_one": {
+        "label": "Prompt All in One",
+        "directory": "sd-webui-prompt-all-in-one",
+        "repo_url": "https://github.com/Physton/sd-webui-prompt-all-in-one.git",
+        "zip_url": "https://github.com/Physton/sd-webui-prompt-all-in-one/archive/refs/heads/main.zip",
+    },
+    "tagcomplete": {
+        "label": "TagComplete",
+        "directory": "a1111-sd-webui-tagcomplete",
+        "repo_url": "https://github.com/DominikDoom/a1111-sd-webui-tagcomplete.git",
+        "zip_url": "https://github.com/DominikDoom/a1111-sd-webui-tagcomplete/archive/refs/heads/main.zip",
+    },
+}
+BUILTIN_GROUP_TAGS = [
+    {
+        "name": "人物",
+        "groups": [
+            {
+                "name": "基础",
+                "color": "#6ea8fe",
+                "tags": {
+                    "1girl": "单个女孩",
+                    "1boy": "单个男孩",
+                    "solo": "单人",
+                    "multiple girls": "多个女孩",
+                    "portrait": "肖像",
+                    "full body": "全身",
+                    "upper body": "上半身",
+                    "looking at viewer": "看向观众",
+                },
+            },
+            {
+                "name": "头发五官",
+                "color": "#9ed06e",
+                "tags": {
+                    "long hair": "长发",
+                    "short hair": "短发",
+                    "bangs": "刘海",
+                    "blue eyes": "蓝眼睛",
+                    "red eyes": "红眼睛",
+                    "silver hair": "银发",
+                    "white hair": "白发",
+                    "black hair": "黑发",
+                },
+            },
+        ],
+    },
+    {
+        "name": "服饰",
+        "groups": [
+            {
+                "name": "常用服装",
+                "color": "#f2b56b",
+                "tags": {
+                    "dress": "连衣裙",
+                    "school uniform": "校服",
+                    "sailor collar": "水手领",
+                    "shirt": "衬衫",
+                    "skirt": "裙子",
+                    "jacket": "外套",
+                    "thighhighs": "过膝袜",
+                    "boots": "靴子",
+                },
+            },
+        ],
+    },
+    {
+        "name": "表情动作",
+        "groups": [
+            {
+                "name": "表情",
+                "color": "#f48fb1",
+                "tags": {
+                    "smile": "微笑",
+                    "blush": "脸红",
+                    "open mouth": "张嘴",
+                    "closed eyes": "闭眼",
+                    "crying": "哭泣",
+                    "serious": "严肃",
+                },
+            },
+            {
+                "name": "动作",
+                "color": "#ce93d8",
+                "tags": {
+                    "standing": "站立",
+                    "sitting": "坐着",
+                    "walking": "行走",
+                    "running": "奔跑",
+                    "arms behind back": "手背在身后",
+                    "hand on hip": "手叉腰",
+                },
+            },
+        ],
+    },
+    {
+        "name": "画面",
+        "groups": [
+            {
+                "name": "质量",
+                "color": "#ffd166",
+                "tags": {
+                    "masterpiece": "杰作",
+                    "best quality": "最佳质量",
+                    "high quality": "高质量",
+                    "very aesthetic": "非常美观",
+                    "detailed": "细节丰富",
+                    "sharp focus": "清晰聚焦",
+                },
+            },
+            {
+                "name": "构图",
+                "color": "#80cbc4",
+                "tags": {
+                    "close-up": "特写",
+                    "cowboy shot": "牛仔景",
+                    "wide shot": "远景",
+                    "from above": "俯视",
+                    "from below": "仰视",
+                    "dynamic angle": "动态角度",
+                },
+            },
+        ],
+    },
+    {
+        "name": "环境光照",
+        "groups": [
+            {
+                "name": "场景",
+                "color": "#90caf9",
+                "tags": {
+                    "outdoors": "户外",
+                    "indoors": "室内",
+                    "city": "城市",
+                    "forest": "森林",
+                    "sea": "海边",
+                    "sky": "天空",
+                    "night": "夜晚",
+                    "sunset": "日落",
+                },
+            },
+            {
+                "name": "光照",
+                "color": "#fff176",
+                "tags": {
+                    "soft lighting": "柔和光照",
+                    "rim light": "轮廓光",
+                    "backlighting": "逆光",
+                    "cinematic lighting": "电影感光照",
+                    "warm light": "暖光",
+                    "cool light": "冷光",
+                },
+            },
+        ],
+    },
+    {
+        "name": "反向提示词",
+        "groups": [
+            {
+                "name": "质量问题",
+                "color": "#ef9a9a",
+                "tags": {
+                    "worst quality": "最差质量",
+                    "low quality": "低质量",
+                    "lowres": "低分辨率",
+                    "blurry": "模糊",
+                    "jpeg artifacts": "JPEG压缩痕迹",
+                    "watermark": "水印",
+                    "text": "文字",
+                    "artist name": "作者名",
+                },
+            },
+            {
+                "name": "人体问题",
+                "color": "#ef5350",
+                "tags": {
+                    "bad anatomy": "错误人体",
+                    "bad hands": "坏手",
+                    "extra fingers": "多余手指",
+                    "missing fingers": "缺少手指",
+                    "extra arms": "多余手臂",
+                    "extra legs": "多余腿",
+                    "bad feet": "坏脚",
+                    "deformed": "变形",
+                    "ugly face": "丑脸",
+                },
+            },
+        ],
+    },
+]
 
 
 def _load_local_config():
@@ -52,6 +263,47 @@ def _load_local_config():
 
 
 LOCAL_CONFIG = _load_local_config()
+
+
+def _bridge_settings():
+    raw = LOCAL_CONFIG.get("settings") if isinstance(LOCAL_CONFIG, dict) else {}
+    settings = dict(DEFAULT_BRIDGE_SETTINGS)
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            if key not in settings:
+                continue
+            if key == "show_startup_wizard":
+                settings[key] = bool(value)
+            elif key in _SETTING_CHOICES:
+                value = str(value or "").strip()
+                if value in _SETTING_CHOICES[key]:
+                    settings[key] = value
+    return settings
+
+
+def _write_local_config(config):
+    LOCAL_CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _data_source_mode():
+    return _bridge_settings().get("data_source", "auto")
+
+
+def _translation_source_mode():
+    return _bridge_settings().get("translation_source", "auto")
+
+
+def _should_read_webui_data():
+    return _data_source_mode() != "builtin"
+
+
+def _should_use_builtin_prompt_data(webui_groups=None):
+    mode = _data_source_mode()
+    if mode == "builtin":
+        return True
+    if mode == "webui":
+        return False
+    return not webui_groups
 
 
 def _path_text(path):
@@ -339,26 +591,9 @@ def _validate_preview_image(image_bytes, extension):
         raise ValueError("Preview image content does not match its file type")
 
 
-def _load_prompt_all_in_one_group_tags(lang="zh_CN"):
-    base = _prompt_all_in_one_path("group_tags")
-    custom = base / "custom.yaml"
-    if custom.exists() and _read_text_if_exists(custom).strip():
-        main_file = custom
-    else:
-        main_file = base / f"{lang}.yaml"
-        if not main_file.exists():
-            main_file = base / "default.yaml"
-
-    content = ""
-    content += _read_text_if_exists(base / "prepend.yaml") + "\n\n"
-    content += _read_text_if_exists(main_file) + "\n\n"
-    content += _read_text_if_exists(base / "append.yaml") + "\n\n"
-    if not content.strip():
-        return []
-
-    data = yaml.safe_load(content) or []
+def _normalize_prompt_group_data(data, key_prefix="groupTags"):
     normalized = []
-    for group_index, group in enumerate(data):
+    for group_index, group in enumerate(data or []):
         if not isinstance(group, dict):
             continue
         group_name = str(group.get("name") or "")
@@ -383,16 +618,86 @@ def _load_prompt_all_in_one_group_tags(lang="zh_CN"):
                 "name": str(sub_group.get("name") or ""),
                 "color": sub_group.get("color") or "",
                 "type": sub_group.get("type") or "tags",
-                "tabKey": f"groupTags-{group_index}-{sub_index}",
+                "tabKey": f"{key_prefix}-{group_index}-{sub_index}",
                 "tags": tags,
             })
         normalized.append({
             "name": group_name,
-            "tabKey": f"groupTags-{group_index}",
+            "tabKey": f"{key_prefix}-{group_index}",
             "type": group.get("type") or "tags",
             "groups": groups,
         })
     return normalized
+
+
+def _builtin_prompt_all_in_one_group_tags(lang="zh_CN"):
+    return _normalize_prompt_group_data(BUILTIN_GROUP_TAGS, "builtinTags")
+
+
+def _custom_prompt_all_in_one_group_tags():
+    raw_items = LOCAL_CONFIG.get("custom_tags") if isinstance(LOCAL_CONFIG, dict) else []
+    if not isinstance(raw_items, list):
+        return []
+    grouped = {}
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        prompt = _truncate_text(item.get("prompt") or item.get("text") or "", MAX_STYLE_NAME_LENGTH).strip()
+        if not prompt:
+            continue
+        local = _truncate_text(item.get("local") or item.get("name") or "", MAX_STYLE_NAME_LENGTH).strip()
+        group_name = _truncate_text(item.get("group") or "", MAX_STYLE_NAME_LENGTH).strip()
+        sub_name = _truncate_text(item.get("subgroup") or item.get("category") or "", MAX_STYLE_NAME_LENGTH).strip()
+        kind = _validate_kind(item.get("kind") or item.get("type") or "positive")
+        if kind == "negative":
+            group_name = group_name or "反向提示词"
+            sub_name = sub_name or "导入词库"
+        else:
+            group_name = group_name or "导入词库"
+            sub_name = sub_name or "提示词"
+        grouped.setdefault(group_name, {}).setdefault(sub_name, {})[prompt] = local
+    data = []
+    for group_name, subgroups in grouped.items():
+        data.append({
+            "name": group_name,
+            "groups": [
+                {"name": sub_name, "color": "#8ab4f8", "tags": tags}
+                for sub_name, tags in subgroups.items()
+            ],
+        })
+    return _normalize_prompt_group_data(data, "customTags")
+
+
+def _load_webui_prompt_all_in_one_group_tags(lang="zh_CN"):
+    if not _should_read_webui_data():
+        return []
+    base = _prompt_all_in_one_path("group_tags")
+    custom = base / "custom.yaml"
+    if custom.exists() and _read_text_if_exists(custom).strip():
+        main_file = custom
+    else:
+        main_file = base / f"{lang}.yaml"
+        if not main_file.exists():
+            main_file = base / "default.yaml"
+
+    content = ""
+    content += _read_text_if_exists(base / "prepend.yaml") + "\n\n"
+    content += _read_text_if_exists(main_file) + "\n\n"
+    content += _read_text_if_exists(base / "append.yaml") + "\n\n"
+    if not content.strip():
+        return []
+
+    data = yaml.safe_load(content) or []
+    return _normalize_prompt_group_data(data, "groupTags")
+
+
+def _load_prompt_all_in_one_group_tags(lang="zh_CN"):
+    webui_groups = _load_webui_prompt_all_in_one_group_tags(lang)
+    groups = list(webui_groups)
+    if _should_use_builtin_prompt_data(webui_groups):
+        groups.extend(_builtin_prompt_all_in_one_group_tags(lang))
+    groups.extend(_custom_prompt_all_in_one_group_tags())
+    return groups
 
 
 def _load_tag_autocomplete_items():
@@ -401,39 +706,41 @@ def _load_tag_autocomplete_items():
         return _TAG_AUTOCOMPLETE_CACHE
 
     zh_map = {}
-    zh_file = TAGCOMPLETE_DIR / "tags" / "danbooru.zh_CN_SFW.csv"
-    try:
-        with zh_file.open("r", encoding="utf-8-sig", newline="") as f:
-            for row in csv.reader(f):
-                if len(row) >= 2 and row[0].strip():
-                    zh_map[row[0].strip().casefold()] = row[1].strip()
-    except Exception:
-        pass
+    if _should_read_webui_data():
+        zh_file = TAGCOMPLETE_DIR / "tags" / "danbooru.zh_CN_SFW.csv"
+        try:
+            with zh_file.open("r", encoding="utf-8-sig", newline="") as f:
+                for row in csv.reader(f):
+                    if len(row) >= 2 and row[0].strip():
+                        zh_map[row[0].strip().casefold()] = row[1].strip()
+        except Exception:
+            pass
 
     items = []
-    tag_file = TAGCOMPLETE_DIR / "tags" / "danbooru.csv"
-    try:
-        with tag_file.open("r", encoding="utf-8-sig", newline="") as f:
-            for row in csv.reader(f):
-                if not row or not row[0].strip():
-                    continue
-                tag = row[0].strip()
-                try:
-                    count = int(row[2]) if len(row) > 2 and row[2] else 0
-                except ValueError:
-                    count = 0
-                aliases = []
-                if len(row) > 3 and row[3]:
-                    aliases = [x.strip() for x in row[3].split(",") if x.strip()]
-                items.append({
-                    "text": tag,
-                    "local": zh_map.get(tag.casefold(), ""),
-                    "count": count,
-                    "aliases": aliases[:12],
-                    "type": "tag",
-                })
-    except Exception:
-        pass
+    if _should_read_webui_data():
+        tag_file = TAGCOMPLETE_DIR / "tags" / "danbooru.csv"
+        try:
+            with tag_file.open("r", encoding="utf-8-sig", newline="") as f:
+                for row in csv.reader(f):
+                    if not row or not row[0].strip():
+                        continue
+                    tag = row[0].strip()
+                    try:
+                        count = int(row[2]) if len(row) > 2 and row[2] else 0
+                    except ValueError:
+                        count = 0
+                    aliases = []
+                    if len(row) > 3 and row[3]:
+                        aliases = [x.strip() for x in row[3].split(",") if x.strip()]
+                    items.append({
+                        "text": tag,
+                        "local": zh_map.get(tag.casefold(), ""),
+                        "count": count,
+                        "aliases": aliases[:12],
+                        "type": "tag",
+                    })
+        except Exception:
+            pass
 
     # Prompt All-in-One grouped tags should also participate even if they are
     # absent from tagcomplete's frequency database.
@@ -658,6 +965,8 @@ def _webui_translate_api_config(api_key):
 def _webui_network_translate(text, from_lang="zh_CN", to_lang="en_US"):
     text = str(text or "").strip()
     if not text:
+        return ""
+    if _translation_source_mode() == "builtin":
         return ""
     api_data = _load_webui_translate_apis()
     api_key = _storage_get("translateApi", api_data.get("default") or "alibaba_free")
@@ -886,33 +1195,35 @@ def _build_prompt_all_in_one_translation_maps(lang="zh_CN"):
     # TagComplete's Chinese CSV is the broad Danbooru translation source used
     # by WebUI autocomplete. Merge it before group tags; group tags may override
     # local labels but should not remove the much larger dictionary.
-    zh_file = TAGCOMPLETE_DIR / "tags" / "danbooru.zh_CN_SFW.csv"
-    try:
-        with zh_file.open("r", encoding="utf-8-sig", newline="") as f:
-            for row in csv.reader(f):
-                if len(row) >= 2:
-                    add_pair(row[0], row[1])
-    except Exception:
-        pass
+    if _should_read_webui_data():
+        zh_file = TAGCOMPLETE_DIR / "tags" / "danbooru.zh_CN_SFW.csv"
+        try:
+            with zh_file.open("r", encoding="utf-8-sig", newline="") as f:
+                for row in csv.reader(f):
+                    if len(row) >= 2:
+                        add_pair(row[0], row[1])
+        except Exception:
+            pass
 
     # Also use the main autocomplete CSV aliases so shorthand/alternate English
     # spellings normalize to the canonical Danbooru tag.
-    tag_file = TAGCOMPLETE_DIR / "tags" / "danbooru.csv"
-    try:
-        with tag_file.open("r", encoding="utf-8-sig", newline="") as f:
-            for row in csv.reader(f):
-                if not row:
-                    continue
-                prompt = row[0].strip()
-                if prompt:
-                    prompt_to_local.setdefault(_normalize_lookup_key(prompt), prompt_to_local.get(_normalize_lookup_key(prompt), ""))
-                    if len(row) > 3 and row[3]:
-                        for alias in row[3].split(","):
-                            alias = alias.strip()
-                            if alias:
-                                local_to_prompt.setdefault(_normalize_lookup_key(alias), prompt)
-    except Exception:
-        pass
+    if _should_read_webui_data():
+        tag_file = TAGCOMPLETE_DIR / "tags" / "danbooru.csv"
+        try:
+            with tag_file.open("r", encoding="utf-8-sig", newline="") as f:
+                for row in csv.reader(f):
+                    if not row:
+                        continue
+                    prompt = row[0].strip()
+                    if prompt:
+                        prompt_to_local.setdefault(_normalize_lookup_key(prompt), prompt_to_local.get(_normalize_lookup_key(prompt), ""))
+                        if len(row) > 3 and row[3]:
+                            for alias in row[3].split(","):
+                                alias = alias.strip()
+                                if alias:
+                                    local_to_prompt.setdefault(_normalize_lookup_key(alias), prompt)
+        except Exception:
+            pass
 
     for group in _load_prompt_all_in_one_group_tags(lang):
         for sub_group in group.get("groups") or []:
@@ -1568,6 +1879,290 @@ def _lora_detail(lora_name):
     }
 
 
+def _settings_response():
+    custom_tags = LOCAL_CONFIG.get("custom_tags") if isinstance(LOCAL_CONFIG, dict) else []
+    return {
+        "settings": _bridge_settings(),
+        "custom_tag_count": len(custom_tags) if isinstance(custom_tags, list) else 0,
+        "config_path": _path_text(LOCAL_CONFIG_PATH),
+        "webui_configured": bool(WEBUI_ROOT),
+        "assets": _bridge_asset_status(),
+    }
+
+
+def _update_bridge_settings(data):
+    config = dict(LOCAL_CONFIG) if isinstance(LOCAL_CONFIG, dict) else {}
+    current = dict(_bridge_settings())
+    for key in DEFAULT_BRIDGE_SETTINGS:
+        if key not in data:
+            continue
+        value = data.get(key)
+        if key == "show_startup_wizard":
+            current[key] = bool(value)
+        elif key in _SETTING_CHOICES:
+            value = str(value or "").strip()
+            if value in _SETTING_CHOICES[key]:
+                current[key] = value
+    config["settings"] = current
+    _write_local_config(config)
+    _apply_local_config(config)
+    return _settings_response()
+
+
+def _normalize_imported_tag_item(item):
+    if not isinstance(item, dict):
+        return None
+    prompt = _truncate_text(item.get("prompt") or item.get("text") or "", MAX_STYLE_NAME_LENGTH).strip()
+    if not prompt:
+        return None
+    local = _truncate_text(item.get("local") or item.get("name") or item.get("zh") or "", MAX_STYLE_NAME_LENGTH).strip()
+    group = _truncate_text(item.get("group") or "", MAX_STYLE_NAME_LENGTH).strip()
+    subgroup = _truncate_text(item.get("subgroup") or item.get("category") or "", MAX_STYLE_NAME_LENGTH).strip()
+    kind = _validate_kind(item.get("kind") or item.get("type") or "positive")
+    return {
+        "prompt": prompt,
+        "local": local,
+        "group": group,
+        "subgroup": subgroup,
+        "kind": kind,
+    }
+
+
+def _import_custom_tags(items):
+    config = dict(LOCAL_CONFIG) if isinstance(LOCAL_CONFIG, dict) else {}
+    current = config.get("custom_tags")
+    if not isinstance(current, list):
+        current = []
+    seen = {
+        (
+            str(item.get("prompt") or "").casefold(),
+            str(item.get("local") or "").casefold(),
+            str(item.get("group") or "").casefold(),
+            str(item.get("subgroup") or "").casefold(),
+            str(item.get("kind") or "positive"),
+        )
+        for item in current
+        if isinstance(item, dict)
+    }
+    imported = []
+    for item in items[:2000]:
+        normalized = _normalize_imported_tag_item(item)
+        if not normalized:
+            continue
+        key = (
+            normalized["prompt"].casefold(),
+            normalized["local"].casefold(),
+            normalized["group"].casefold(),
+            normalized["subgroup"].casefold(),
+            normalized["kind"],
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        imported.append(normalized)
+    if imported:
+        current.extend(imported)
+        config["custom_tags"] = current[-5000:]
+        settings = dict(_bridge_settings())
+        settings["data_source"] = "builtin" if settings.get("data_source") == "webui" else settings.get("data_source", "auto")
+        settings["show_startup_wizard"] = False
+        config["settings"] = settings
+        _write_local_config(config)
+        _apply_local_config(config)
+    return {
+        "success": True,
+        "imported": len(imported),
+        "total": len(config.get("custom_tags") or current),
+        **_settings_response(),
+    }
+
+
+def _asset_target(parent, spec):
+    return parent / spec["directory"]
+
+
+def _asset_exists(path):
+    try:
+        return path.exists() and path.is_dir() and any(path.iterdir())
+    except Exception:
+        return False
+
+
+def _bridge_asset_status(webui_root=None):
+    local = {}
+    webui = {}
+    local_parent = DATA_DIR
+    root = _existing_path(webui_root) or WEBUI_ROOT
+    webui_parent = root / "extensions" if root else None
+    for key, spec in EXTENSION_ASSETS.items():
+        local_path = _asset_target(local_parent, spec)
+        local[key] = {
+            "label": spec["label"],
+            "path": _path_text(local_path),
+            "exists": _asset_exists(local_path),
+        }
+        if webui_parent:
+            webui_path = _asset_target(webui_parent, spec)
+            webui[key] = {
+                "label": spec["label"],
+                "path": _path_text(webui_path),
+                "exists": _asset_exists(webui_path),
+            }
+    return {"local": local, "webui": webui}
+
+
+def _ensure_within_parent(path, parent):
+    path = Path(path).resolve()
+    parent = Path(parent).resolve()
+    if not path.is_relative_to(parent):
+        raise ValueError("Unsafe extension install path")
+    return path
+
+
+def _remove_partial_directory(path, parent):
+    path = _ensure_within_parent(path, parent)
+    if path.exists():
+        shutil.rmtree(path)
+
+
+def _safe_extract_zip(zip_path, extract_dir):
+    extract_dir = Path(extract_dir).resolve()
+    with zipfile.ZipFile(zip_path) as archive:
+        for member in archive.infolist():
+            destination = (extract_dir / member.filename).resolve()
+            if not destination.is_relative_to(extract_dir):
+                raise ValueError("Downloaded archive contains unsafe paths")
+        archive.extractall(extract_dir)
+
+
+def _download_asset_zip(spec, target, parent):
+    parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="webui-bridge-", dir=str(parent)) as tmp:
+        tmp_path = Path(tmp)
+        zip_path = tmp_path / "asset.zip"
+        request = urllib.request.Request(
+            spec["zip_url"],
+            headers={"User-Agent": "ComfyUI-WebUI-Prompt-Bridge"},
+        )
+        with urllib.request.urlopen(request, timeout=90) as response, zip_path.open("wb") as file:
+            shutil.copyfileobj(response, file)
+        extract_dir = tmp_path / "extract"
+        extract_dir.mkdir()
+        _safe_extract_zip(zip_path, extract_dir)
+        children = [child for child in extract_dir.iterdir() if child.is_dir()]
+        source = children[0] if len(children) == 1 else extract_dir
+        if target.exists():
+            _remove_partial_directory(target, parent)
+        shutil.move(str(source), str(target))
+    return "zip"
+
+
+def _install_extension_asset(key, parent):
+    spec = EXTENSION_ASSETS[key]
+    target = _ensure_within_parent(_asset_target(parent, spec), parent)
+    parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() and not _asset_exists(target):
+        target.rmdir()
+    if _asset_exists(target):
+        return {
+            "id": key,
+            "label": spec["label"],
+            "status": "exists",
+            "path": _path_text(target),
+        }
+
+    errors = []
+    git_exe = shutil.which("git")
+    if git_exe:
+        result = subprocess.run(
+            [git_exe, "clone", "--depth", "1", spec["repo_url"], str(target)],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if result.returncode == 0 and _asset_exists(target):
+            return {
+                "id": key,
+                "label": spec["label"],
+                "status": "installed",
+                "method": "git",
+                "path": _path_text(target),
+            }
+        errors.append((result.stderr or result.stdout or "git clone failed").strip())
+        if target.exists():
+            _remove_partial_directory(target, parent)
+
+    try:
+        method = _download_asset_zip(spec, target, parent)
+        return {
+            "id": key,
+            "label": spec["label"],
+            "status": "installed",
+            "method": method,
+            "path": _path_text(target),
+        }
+    except Exception as exc:
+        errors.append(str(exc))
+        if target.exists():
+            _remove_partial_directory(target, parent)
+        return {
+            "id": key,
+            "label": spec["label"],
+            "status": "error",
+            "error": "；".join(error for error in errors if error) or "download failed",
+            "path": _path_text(target),
+        }
+
+
+def _install_extension_assets(data):
+    mode = str(data.get("mode") or "local").strip().lower()
+    if mode not in {"local", "webui"}:
+        raise ValueError("mode must be local or webui")
+    selected = data.get("assets") or list(EXTENSION_ASSETS.keys())
+    selected = [key for key in selected if key in EXTENSION_ASSETS]
+    if not selected:
+        selected = list(EXTENSION_ASSETS.keys())
+
+    root = None
+    if mode == "webui":
+        root_text = _truncate_text(data.get("webui_root") or data.get("root") or "", MAX_WEBUI_ROOT_LENGTH)
+        root = _existing_path(root_text) or WEBUI_ROOT
+        if not root:
+            guesses = _guess_webui_roots()
+            root = _existing_path(guesses[0]) if guesses else None
+        if not root or not _looks_like_webui_root(root):
+            raise ValueError("没有可用 WebUI 根目录；如果用户没有 WebUI，请使用“下载本地数据包”")
+        parent = root / "extensions"
+    else:
+        parent = DATA_DIR
+
+    results = [_install_extension_asset(key, parent) for key in selected]
+    ok = all(item["status"] in {"exists", "installed"} for item in results)
+    if ok:
+        config = dict(LOCAL_CONFIG) if isinstance(LOCAL_CONFIG, dict) else {}
+        settings = dict(_bridge_settings())
+        settings["data_source"] = "auto"
+        settings["translation_source"] = "auto"
+        settings["show_startup_wizard"] = False
+        config["settings"] = settings
+        if mode == "webui":
+            config.update(_build_webui_config(root))
+        else:
+            config["prompt_all_in_one_dir"] = _path_text(DATA_DIR / EXTENSION_ASSETS["prompt_all_in_one"]["directory"])
+            config["tagcomplete_dir"] = _path_text(DATA_DIR / EXTENSION_ASSETS["tagcomplete"]["directory"])
+            config.setdefault("storage_dir", _path_text(DATA_DIR / "storage"))
+        _write_local_config(config)
+        _apply_local_config(config)
+
+    return {
+        "ok": ok,
+        "mode": mode,
+        "webui_root": _path_text(root),
+        "results": results,
+        **_settings_response(),
+    }
+
+
 class WebUIPromptBridge:
     CATEGORY = "conditioning/webui"
     FUNCTION = "build"
@@ -1682,10 +2277,59 @@ def _register_routes():
             return None
         return web.json_response({"error": "Cross-origin requests are not allowed"}, status=403)
 
+    @routes.get("/webui_prompt_bridge/settings")
+    async def bridge_settings_get(request):
+        return web.json_response(_settings_response())
+
+    @routes.post("/webui_prompt_bridge/settings")
+    async def bridge_settings_post(request):
+        rejected = reject_cross_origin(request)
+        if rejected is not None:
+            return rejected
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        return web.json_response(_update_bridge_settings(data))
+
+    @routes.post("/webui_prompt_bridge/import_tags")
+    async def bridge_import_tags(request):
+        rejected = reject_cross_origin(request)
+        if rejected is not None:
+            return rejected
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        items = data.get("items") or data.get("tags") or []
+        if not isinstance(items, list):
+            return web.json_response({"error": "items must be a list"}, status=400)
+        return web.json_response(_import_custom_tags(items))
+
+    @routes.post("/webui_prompt_bridge/install_assets")
+    async def bridge_install_assets(request):
+        rejected = reject_cross_origin(request)
+        if rejected is not None:
+            return rejected
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        try:
+            result = _install_extension_assets(data)
+            return web.json_response(result, status=200 if result.get("ok") else 500)
+        except Exception as exc:
+            return web.json_response({
+                "ok": False,
+                "error": str(exc),
+                **_settings_response(),
+            }, status=400)
+
     @routes.get("/webui_prompt_bridge/webui_integration")
     async def webui_integration_get(request):
         return web.json_response({
             **_webui_integration_status(),
+            "assets": _bridge_asset_status(),
             "guesses": _guess_webui_roots(),
         })
 
@@ -1708,13 +2352,18 @@ def _register_routes():
         try:
             config = dict(LOCAL_CONFIG)
             config.update(_build_webui_config(root))
-            LOCAL_CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
+            settings = dict(_bridge_settings())
+            settings["data_source"] = "auto"
+            settings["show_startup_wizard"] = False
+            config["settings"] = settings
+            _write_local_config(config)
             _apply_local_config(config)
             added_model_paths = _apply_webui_model_paths(root)
             return web.json_response({
                 "ok": True,
                 "message": "WebUI data connected",
                 **_webui_integration_status(root),
+                "assets": _bridge_asset_status(root),
                 "added_model_paths": added_model_paths,
                 "guesses": _guess_webui_roots(),
             })

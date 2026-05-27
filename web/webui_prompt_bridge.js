@@ -16,6 +16,21 @@ const PANEL_MAX_WIDTH = 1600;
 const PANEL_MIN_HEIGHT = 620;
 const DOM_WIDGET_LAYOUT_PAD = 58;
 const PROMPT_CHIPS_MIN_HEIGHT = 104;
+const DEFAULT_BRIDGE_SETTINGS = {
+    data_source: "auto",
+    translation_source: "auto",
+    show_startup_wizard: true,
+    layout_preset: "default",
+    tag_display: "local_first",
+    lora_card_size: "normal",
+};
+const SETTING_CHOICES = {
+    data_source: ["auto", "webui", "builtin"],
+    translation_source: ["auto", "webui", "builtin"],
+    layout_preset: ["default", "compact", "roomy"],
+    tag_display: ["local_first", "prompt_first", "compact"],
+    lora_card_size: ["compact", "normal", "large"],
+};
 const SPLIT_ANIMA_MODEL_VALUE = "__webui_bridge_split_anima_qwen__";
 const SPLIT_ANIMA_MODEL_LABEL = "分体 Anima/Qwen（Anima UNET + Text Encoder + VAE）";
 const DEFAULT_QUALITY_TAGS = [
@@ -119,6 +134,18 @@ function el(tag, attrs = {}, children = []) {
 
 function getWidget(node, name) {
     return node?.widgets?.find((widget) => widget.name === name);
+}
+
+function normalizeBridgeSettings(settings = {}) {
+    const normalized = { ...DEFAULT_BRIDGE_SETTINGS };
+    for (const [key, value] of Object.entries(settings || {})) {
+        if (key === "show_startup_wizard") {
+            normalized[key] = Boolean(value);
+        } else if (SETTING_CHOICES[key]?.includes(value)) {
+            normalized[key] = value;
+        }
+    }
+    return normalized;
 }
 
 function installWidgetSerializationFallback(widget, serializer = null) {
@@ -1376,12 +1403,13 @@ function applyStyleText(base, styleText) {
 }
 
 async function loadBridgeData() {
-    const [lorasRes, stylesRes, promptAllInOneRes, modelsRes, webuiRes] = await Promise.allSettled([
+    const [lorasRes, stylesRes, promptAllInOneRes, modelsRes, webuiRes, settingsRes] = await Promise.allSettled([
         api.fetchApi("/webui_prompt_bridge/loras", { cache: "no-store" }).then((r) => r.json()),
         api.fetchApi("/webui_prompt_bridge/styles", { cache: "no-store" }).then((r) => r.json()),
         api.fetchApi("/webui_prompt_bridge/prompt_all_in_one?lang=zh_CN", { cache: "no-store" }).then((r) => r.json()),
         api.fetchApi("/webui_prompt_bridge/models", { cache: "no-store" }).then((r) => r.json()),
         api.fetchApi("/webui_prompt_bridge/webui_integration", { cache: "no-store" }).then((r) => r.json()),
+        api.fetchApi("/webui_prompt_bridge/settings", { cache: "no-store" }).then((r) => r.json()),
     ]);
     return {
         loras: lorasRes.status === "fulfilled" ? lorasRes.value.loras || [] : [],
@@ -1389,6 +1417,9 @@ async function loadBridgeData() {
         promptAllInOne: promptAllInOneRes.status === "fulfilled" ? promptAllInOneRes.value : { group_tags: [], favorites: {} },
         models: modelsRes.status === "fulfilled" ? modelsRes.value : { checkpoints: [], unets: [], clips: [], vaes: [] },
         webuiIntegration: webuiRes.status === "fulfilled" ? webuiRes.value : null,
+        settings: normalizeBridgeSettings(settingsRes.status === "fulfilled" ? settingsRes.value.settings : null),
+        customTagCount: settingsRes.status === "fulfilled" ? settingsRes.value.custom_tag_count || 0 : 0,
+        assets: settingsRes.status === "fulfilled" ? settingsRes.value.assets || null : null,
     };
 }
 
@@ -2514,6 +2545,136 @@ async function connectWebUIRoot(webuiRoot, autoDetect = false) {
     return data;
 }
 
+async function saveBridgeSettings(settings) {
+    const response = await api.fetchApi("/webui_prompt_bridge/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(settings),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    return response.json();
+}
+
+async function importBridgeTags(items) {
+    const response = await api.fetchApi("/webui_prompt_bridge/import_tags", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    return response.json();
+}
+
+async function installBridgeAssets(mode, webuiRoot = "") {
+    const response = await api.fetchApi("/webui_prompt_bridge/install_assets", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode, webui_root: webuiRoot }),
+    });
+    const text = await response.text();
+    let data = {};
+    try {
+        data = text ? JSON.parse(text) : {};
+    } catch {
+        data = {};
+    }
+    if (response.status === 404 || response.status === 405) {
+        throw new Error("后端安装接口未加载，请重启 ComfyUI 后再试");
+    }
+    if (!response.ok || data.ok === false) {
+        const detail = (data.results || []).map((item) => item.error).filter(Boolean).join("；");
+        throw new Error(data.error || detail || text || "下载失败");
+    }
+    return data;
+}
+
+function assetInstallMessage(result) {
+    const installed = (result.results || []).filter((item) => item.status === "installed").length;
+    const exists = (result.results || []).filter((item) => item.status === "exists").length;
+    const total = (result.results || []).length;
+    if (installed) return `已安装 ${installed}/${total} 个配套数据${exists ? `，${exists} 个已存在` : ""}`;
+    return `配套数据已存在 ${exists}/${total}`;
+}
+
+function webuiExtensionsReady(info, assets = null) {
+    const checks = info?.checks || {};
+    const assetWebui = assets?.webui || {};
+    const promptReady = Boolean(checks.prompt_all_in_one_dir?.exists || assetWebui.prompt_all_in_one?.exists);
+    const tagReady = Boolean(checks.tagcomplete_dir?.exists || assetWebui.tagcomplete?.exists);
+    return promptReady && tagReady;
+}
+
+function parseDelimitedLine(line) {
+    const result = [];
+    let value = "";
+    let quoted = false;
+    for (let index = 0; index < line.length; index += 1) {
+        const char = line[index];
+        const next = line[index + 1];
+        if (char === '"' && quoted && next === '"') {
+            value += '"';
+            index += 1;
+        } else if (char === '"') {
+            quoted = !quoted;
+        } else if (!quoted && (char === "," || char === "\t")) {
+            result.push(value.trim());
+            value = "";
+        } else {
+            value += char;
+        }
+    }
+    result.push(value.trim());
+    return result;
+}
+
+function normalizeImportedTag(row, headers = null) {
+    if (!row) return null;
+    if (!Array.isArray(row) && typeof row === "object") {
+        return {
+            prompt: row.prompt || row.text || row.tag || "",
+            local: row.local || row.name || row.zh || "",
+            group: row.group || "",
+            subgroup: row.subgroup || row.category || "",
+            kind: row.kind || row.type || "positive",
+        };
+    }
+    const get = (name, fallbackIndex) => {
+        const index = headers?.indexOf(name);
+        return row[index >= 0 ? index : fallbackIndex] || "";
+    };
+    return {
+        prompt: get("prompt", 0) || get("text", 0) || get("tag", 0),
+        local: get("local", 1) || get("name", 1) || get("zh", 1),
+        group: get("group", 2),
+        subgroup: get("subgroup", 3) || get("category", 3),
+        kind: get("kind", 4) || get("type", 4) || "positive",
+    };
+}
+
+async function parseImportedTagFile(file) {
+    const text = await file.text();
+    const trimmed = text.trim();
+    if (!trimmed) return [];
+    try {
+        const json = JSON.parse(trimmed);
+        const rows = Array.isArray(json) ? json : (Array.isArray(json.tags) ? json.tags : Object.entries(json).map(([local, prompt]) => ({ local, prompt })));
+        return rows.map((row) => normalizeImportedTag(row)).filter((row) => row?.prompt);
+    } catch {
+        // Fall through to CSV/TSV parsing.
+    }
+    const lines = trimmed.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (!lines.length) return [];
+    let headers = null;
+    const first = parseDelimitedLine(lines[0]).map((item) => item.toLowerCase());
+    if (first.some((item) => ["prompt", "text", "tag", "local", "zh", "group", "category", "kind", "type"].includes(item))) {
+        headers = first;
+        lines.shift();
+    }
+    return lines
+        .map((line) => normalizeImportedTag(parseDelimitedLine(line), headers))
+        .filter((row) => row?.prompt);
+}
+
 function loraPromptText(item) {
     const weight = Number(item?.preferred_weight || item?.user_metadata?.["preferred weight"] || 0);
     const strength = weight > 0 ? weight : 1;
@@ -3146,10 +3307,18 @@ function queueErrorMessage(error) {
 function createTagButton(tag, textarea, sync, rerender, isNegative = false, state = null) {
     const prompt = tag.prompt || "";
     const label = tag.local || tag.name || prompt;
-    const children = [
-        el("span", { class: "webui-bridge-aio-local" }, label || prompt),
-        el("span", { class: "webui-bridge-aio-en" }, prompt),
-    ];
+    const tagDisplay = state?.settings?.tag_display || "local_first";
+    const children = tagDisplay === "compact"
+        ? [el("span", { class: "webui-bridge-aio-local" }, label || prompt)]
+        : tagDisplay === "prompt_first"
+            ? [
+                el("span", { class: "webui-bridge-aio-local" }, prompt),
+                label && label !== prompt ? el("span", { class: "webui-bridge-aio-en" }, label) : null,
+            ]
+            : [
+                el("span", { class: "webui-bridge-aio-local" }, label || prompt),
+                el("span", { class: "webui-bridge-aio-en" }, prompt),
+            ];
     if (tag.favoriteItem && tag.id && state) {
         children.push(el("span", {
             class: "webui-bridge-aio-fav-remove",
@@ -3556,6 +3725,9 @@ function buildPanel(node) {
         models: { checkpoints: [], unets: [], clips: [], vaes: [] },
         webuiIntegration: null,
         promptAllInOne: { group_tags: [], favorites: {} },
+        settings: normalizeBridgeSettings(),
+        customTagCount: 0,
+        assets: null,
         selectedStyles: new Set(),
         loraFolder: "__all",
         loraSort: "path",
@@ -3803,6 +3975,9 @@ function buildPanel(node) {
         state.models = data.models;
         state.webuiIntegration = data.webuiIntegration;
         state.promptAllInOne = data.promptAllInOne;
+        state.settings = data.settings;
+        state.customTagCount = data.customTagCount;
+        state.assets = data.assets;
         renderStyles();
         renderModelSwitch();
         renderTree();
@@ -3830,14 +4005,22 @@ function buildPanel(node) {
         const guessSelect = el("select", { class: "webui-bridge-config-input" }, [
             el("option", { value: "" }, "自动检测到的 WebUI 目录"),
         ]);
+        let webuiAssetsButton = null;
         const close = () => mask.remove();
         const renderInfo = (info) => {
             state.webuiIntegration = info;
+            if (info?.assets) state.assets = info.assets;
             rootInput.value = info?.webui_root || rootInput.value || info?.guesses?.[0] || "";
             guessSelect.innerHTML = "";
             guessSelect.append(el("option", { value: "" }, "自动检测到的 WebUI 目录"));
             for (const guess of info?.guesses || []) guessSelect.append(el("option", { value: guess }, guess));
-            statusLine.textContent = webuiStatusText(info);
+            const ready = webuiExtensionsReady(info, state.assets);
+            statusLine.textContent = ready ? `${webuiStatusText(info)}；配套扩展已存在，直接接入即可` : webuiStatusText(info);
+            if (webuiAssetsButton) {
+                webuiAssetsButton.disabled = ready;
+                webuiAssetsButton.textContent = ready ? "扩展已存在" : "补齐缺失扩展";
+                webuiAssetsButton.title = ready ? "Prompt All in One 和 TagComplete 已存在，不需要下载" : "只下载 WebUI 中缺失的配套扩展";
+            }
         };
         const connect = async (autoDetect = false) => {
             let root = rootInput.value.trim();
@@ -3861,6 +4044,31 @@ function buildPanel(node) {
                 statusLine.textContent = `接入失败: ${error?.message || error}`;
             }
         };
+        const installWebUIAssets = async () => {
+            let root = rootInput.value.trim();
+            statusLine.textContent = "正在检测 WebUI 配套扩展...";
+            try {
+                if (!root) {
+                    const latest = await fetchWebUIIntegration();
+                    renderInfo(latest);
+                    root = rootInput.value.trim() || latest?.guesses?.[0] || "";
+                }
+                if (!root) {
+                    statusLine.textContent = "没有 WebUI 根目录；没有 WebUI 的用户请在设置里点“下载本地数据包”。已有 WebUI 和扩展的用户直接接入即可。";
+                    return;
+                }
+                const result = await installBridgeAssets("webui", root);
+                if (result.webui_root) rootInput.value = result.webui_root;
+                state.settings = normalizeBridgeSettings(result.settings);
+                state.customTagCount = result.custom_tag_count || state.customTagCount;
+                renderInfo(await fetchWebUIIntegration());
+                await refreshBridgeData();
+                statusLine.textContent = `${assetInstallMessage(result)}；已存在的扩展不会重复下载`;
+                setStatus("WebUI 配套扩展检查完成", { kind: "success" });
+            } catch (error) {
+                statusLine.textContent = `安装失败: ${error?.message || error}`;
+            }
+        };
         guessSelect.addEventListener("change", () => {
             if (guessSelect.value) rootInput.value = guessSelect.value;
         });
@@ -3879,6 +4087,7 @@ function buildPanel(node) {
             ]),
             el("div", { class: "webui-bridge-config-actions" }, [
                 el("button", { type: "button", onclick: () => connect(true) }, "自动检测"),
+                webuiAssetsButton = el("button", { type: "button", onclick: installWebUIAssets }, "补齐缺失扩展"),
                 el("button", { type: "button", class: "primary", onclick: () => connect(false) }, "接入并刷新"),
             ]),
         ]));
@@ -3890,6 +4099,261 @@ function buildPanel(node) {
         }
         rootInput.focus();
         rootInput.select();
+    };
+
+    const applyLayoutPreset = (preset) => {
+        if (preset === "compact") setNodeSize(900, 700);
+        else if (preset === "roomy") setNodeSize(1320, 1180);
+    };
+
+    const settingSelect = (value, options) => el("select", { class: "webui-bridge-config-input" }, options.map((item) => (
+        el("option", { value: item.value, selected: item.value === value ? "selected" : undefined }, item.label)
+    )));
+
+    const showImportTagsDialog = () => {
+        const mask = el("div", { class: "webui-bridge-config-mask" });
+        const fileInput = el("input", { type: "file", accept: ".csv,.tsv,.txt,.json,application/json,text/csv,text/plain", style: { display: "none" } });
+        const statusLine = el("div", { class: "webui-bridge-config-status" }, `已导入 ${state.customTagCount || 0} 条`);
+        const close = () => mask.remove();
+        const pickFile = () => fileInput.click();
+        const handleFile = async () => {
+            const file = fileInput.files?.[0];
+            if (!file) return;
+            statusLine.textContent = "正在导入...";
+            try {
+                const items = await parseImportedTagFile(file);
+                if (!items.length) {
+                    statusLine.textContent = "没有读到可用 tag";
+                    return;
+                }
+                const result = await importBridgeTags(items);
+                state.settings = normalizeBridgeSettings(result.settings);
+                state.customTagCount = result.custom_tag_count || result.total || state.customTagCount;
+                await refreshBridgeData();
+                statusLine.textContent = `已导入 ${result.imported || 0} 条，当前共 ${state.customTagCount || 0} 条`;
+                setStatus("词库已导入", { kind: "success" });
+            } catch (error) {
+                statusLine.textContent = `导入失败: ${error?.message || error}`;
+            } finally {
+                fileInput.value = "";
+            }
+        };
+        fileInput.addEventListener("change", handleFile);
+        mask.addEventListener("mousedown", (event) => {
+            if (event.target === mask) close();
+        });
+        mask.append(el("div", { class: "webui-bridge-config-panel" }, [
+            el("div", { class: "webui-bridge-config-head" }, [
+                el("span", {}, "导入词库"),
+                el("button", { type: "button", onclick: close }, "×"),
+            ]),
+            el("div", { class: "webui-bridge-config-body" }, [
+                el("div", { class: "webui-bridge-config-note" }, "支持 JSON、CSV、TSV。字段可用 prompt/local/group/subgroup/kind。"),
+                statusLine,
+                fileInput,
+            ]),
+            el("div", { class: "webui-bridge-config-actions" }, [
+                el("button", { type: "button", onclick: close }, "关闭"),
+                el("button", { type: "button", class: "primary", onclick: pickFile }, "选择文件"),
+            ]),
+        ]));
+        document.body.append(mask);
+    };
+
+    const showBridgeSettingsDialog = () => {
+        const mask = el("div", { class: "webui-bridge-config-mask" });
+        const current = normalizeBridgeSettings(state.settings);
+        const dataSource = settingSelect(current.data_source, [
+            { value: "auto", label: "自动" },
+            { value: "builtin", label: "内置数据" },
+            { value: "webui", label: "WebUI" },
+        ]);
+        const translationSource = settingSelect(current.translation_source, [
+            { value: "auto", label: "自动" },
+            { value: "builtin", label: "内置映射" },
+            { value: "webui", label: "WebUI 翻译" },
+        ]);
+        const layoutPreset = settingSelect(current.layout_preset, [
+            { value: "default", label: "默认" },
+            { value: "compact", label: "紧凑" },
+            { value: "roomy", label: "宽松" },
+        ]);
+        const tagDisplay = settingSelect(current.tag_display, [
+            { value: "local_first", label: "中文优先" },
+            { value: "prompt_first", label: "英文优先" },
+            { value: "compact", label: "紧凑" },
+        ]);
+        const loraCardSize = settingSelect(current.lora_card_size, [
+            { value: "compact", label: "紧凑" },
+            { value: "normal", label: "标准" },
+            { value: "large", label: "大图" },
+        ]);
+        const wizardToggle = el("input", { type: "checkbox" });
+        wizardToggle.checked = current.show_startup_wizard;
+        const statusLine = el("div", { class: "webui-bridge-config-status" }, webuiStatusText(state.webuiIntegration));
+        const webuiReady = webuiExtensionsReady(state.webuiIntegration, state.assets);
+        const installWebUIButton = el("button", {
+            type: "button",
+            onclick: () => installWebUIAssetsFromSettings(),
+            disabled: webuiReady ? "disabled" : undefined,
+            title: webuiReady ? "WebUI 配套扩展已存在，不需要下载" : "只补齐 WebUI 中缺失的配套扩展",
+        }, webuiReady ? "扩展已存在" : "补齐 WebUI 扩展");
+        const close = () => mask.remove();
+        const downloadLocalAssets = async () => {
+            statusLine.textContent = "正在下载本地数据包...";
+            try {
+                const result = await installBridgeAssets("local");
+                state.settings = normalizeBridgeSettings(result.settings);
+                state.customTagCount = result.custom_tag_count || state.customTagCount;
+                state.assets = result.assets || state.assets;
+                dataSource.value = state.settings.data_source;
+                translationSource.value = state.settings.translation_source;
+                wizardToggle.checked = state.settings.show_startup_wizard;
+                await refreshBridgeData();
+                statusLine.textContent = `${assetInstallMessage(result)}；没有 WebUI 也可以直接使用补全和分类`;
+                setStatus("本地数据包已就绪", { kind: "success" });
+            } catch (error) {
+                statusLine.textContent = `下载失败: ${error?.message || error}`;
+            }
+        };
+        const installWebUIAssetsFromSettings = async () => {
+            statusLine.textContent = "正在检测 WebUI 扩展...";
+            try {
+                const result = await installBridgeAssets("webui", state.webuiIntegration?.webui_root || "");
+                state.settings = normalizeBridgeSettings(result.settings);
+                state.customTagCount = result.custom_tag_count || state.customTagCount;
+                state.assets = result.assets || state.assets;
+                await refreshBridgeData();
+                installWebUIButton.disabled = true;
+                installWebUIButton.textContent = "扩展已存在";
+                statusLine.textContent = `${assetInstallMessage(result)}；已存在的扩展不会重复下载`;
+                setStatus("WebUI 扩展检查完成", { kind: "success" });
+            } catch (error) {
+                statusLine.textContent = `检查失败: ${error?.message || error}。没有 WebUI 时请点“下载本地数据包”。`;
+            }
+        };
+        const save = async () => {
+            statusLine.textContent = "正在保存...";
+            try {
+                const result = await saveBridgeSettings({
+                    data_source: dataSource.value,
+                    translation_source: translationSource.value,
+                    layout_preset: layoutPreset.value,
+                    tag_display: tagDisplay.value,
+                    lora_card_size: loraCardSize.value,
+                    show_startup_wizard: wizardToggle.checked,
+                });
+                state.settings = normalizeBridgeSettings(result.settings);
+                state.customTagCount = result.custom_tag_count || state.customTagCount;
+                await refreshBridgeData();
+                applyLayoutPreset(state.settings.layout_preset);
+                setStatus("设置已保存", { kind: "success" });
+                close();
+            } catch (error) {
+                statusLine.textContent = `保存失败: ${error?.message || error}`;
+            }
+        };
+        mask.addEventListener("mousedown", (event) => {
+            if (event.target === mask) close();
+        });
+        mask.append(el("div", { class: "webui-bridge-config-panel webui-bridge-settings-panel" }, [
+            el("div", { class: "webui-bridge-config-head" }, [
+                el("span", {}, "设置"),
+                el("button", { type: "button", onclick: close }, "×"),
+            ]),
+            el("div", { class: "webui-bridge-config-body" }, [
+                el("label", {}, [el("span", {}, "数据来源"), dataSource]),
+                el("label", {}, [el("span", {}, "翻译来源"), translationSource]),
+                el("label", {}, [el("span", {}, "布局尺寸"), layoutPreset]),
+                el("label", {}, [el("span", {}, "Tag 显示"), tagDisplay]),
+                el("label", {}, [el("span", {}, "LoRA 卡片"), loraCardSize]),
+                el("label", { class: "webui-bridge-config-check" }, [
+                    wizardToggle,
+                    el("span", {}, "首次向导"),
+                ]),
+                el("div", { class: "webui-bridge-config-note" }, "已有 WebUI 和扩展的用户直接接入即可，不需要下载。没有 WebUI 时点“下载本地数据包”，会把 Prompt All in One 和 TagComplete 的词库下载到本节点 data 目录；有 WebUI 但缺扩展时点“补齐 WebUI 扩展”。"),
+                statusLine,
+            ]),
+            el("div", { class: "webui-bridge-config-actions" }, [
+                el("button", { type: "button", onclick: showImportTagsDialog }, "导入词库"),
+                el("button", { type: "button", onclick: showWebUIIntegrationDialog }, "连接 WebUI"),
+                el("button", { type: "button", onclick: downloadLocalAssets }, "下载本地数据包"),
+                installWebUIButton,
+                el("button", { type: "button", class: "primary", onclick: save }, "保存"),
+            ]),
+        ]));
+        document.body.append(mask);
+    };
+
+    const useBuiltinData = async () => {
+        const result = await saveBridgeSettings({
+            data_source: "builtin",
+            translation_source: "builtin",
+            show_startup_wizard: false,
+        });
+        state.settings = normalizeBridgeSettings(result.settings);
+        await refreshBridgeData();
+        setStatus("已启用内置数据", { kind: "success" });
+    };
+
+    const showStartupWizard = () => {
+        const mask = el("div", { class: "webui-bridge-config-mask" });
+        const close = async (remember = false) => {
+            if (remember) {
+                await saveBridgeSettings({ show_startup_wizard: false }).catch(() => {});
+                state.settings.show_startup_wizard = false;
+            }
+            mask.remove();
+        };
+        mask.append(el("div", { class: "webui-bridge-config-panel webui-bridge-startup" }, [
+            el("div", { class: "webui-bridge-config-head" }, [
+                el("span", {}, "WebUI Prompt Bridge"),
+                el("button", { type: "button", onclick: () => close(false) }, "×"),
+            ]),
+            el("div", { class: "webui-bridge-config-body webui-bridge-startup-actions" }, [
+                el("button", {
+                    type: "button",
+                    onclick: async () => {
+                        await close(true);
+                        showWebUIIntegrationDialog();
+                    },
+                }, [el("b", {}, "连接 WebUI"), el("span", {}, "复用本机 WebUI 数据")]),
+                el("button", {
+                    type: "button",
+                    onclick: async () => {
+                        await useBuiltinData();
+                        await close(true);
+                    },
+                }, [el("b", {}, "使用内置数据"), el("span", {}, "不依赖 WebUI")]),
+                el("button", {
+                    type: "button",
+                    onclick: async () => {
+                        await close(true);
+                        showImportTagsDialog();
+                    },
+                }, [el("b", {}, "导入词库"), el("span", {}, "JSON / CSV / TSV")]),
+            ]),
+            el("div", { class: "webui-bridge-config-actions" }, [
+                el("button", { type: "button", onclick: () => close(true) }, "不再提示"),
+                el("button", {
+                    type: "button",
+                    class: "primary",
+                    onclick: async () => {
+                        await close(false);
+                        showBridgeSettingsDialog();
+                    },
+                }, "设置"),
+            ]),
+        ]));
+        document.body.append(mask);
+    };
+
+    const maybeShowStartupWizard = () => {
+        if (window.__webuiBridgeStartupWizardShown) return;
+        if (state.settings?.show_startup_wizard === false) return;
+        if (state.webuiIntegration?.webui_root) return;
+        window.__webuiBridgeStartupWizardShown = true;
+        window.setTimeout(showStartupWizard, 200);
     };
 
     const renderModelSwitch = () => {
@@ -3988,6 +4452,8 @@ function buildPanel(node) {
     const renderCards = () => {
         const q = networkSearch.value.trim().toLowerCase();
         const filter = state.loraFolder || "__all";
+        cards.classList.toggle("compact", state.settings?.lora_card_size === "compact");
+        cards.classList.toggle("large", state.settings?.lora_card_size === "large");
         const filtered = sortLoras(state.loras.filter((item) => (
             loraMatchesFilter(item, filter) &&
             loraMatchesQuery(item, q)
@@ -4442,6 +4908,12 @@ function buildPanel(node) {
                     title: "只填写 WebUI 根目录，自动接入 Prompt All in One、TagComplete、styles、LoRA 和模型目录",
                     onclick: showWebUIIntegrationDialog,
                 }, "一键接入 WebUI"),
+                el("button", {
+                    class: "webui-bridge-config-button",
+                    type: "button",
+                    title: "设置数据来源、翻译、布局、Tag 和 LoRA 卡片显示",
+                    onclick: showBridgeSettingsDialog,
+                }, "设置"),
                 el("label", {}, [
                     el("span", {}, "CLIP"),
                     clipStrengthInput,
@@ -4525,6 +4997,9 @@ function buildPanel(node) {
         state.styles = data.styles;
         state.models = data.models;
         state.promptAllInOne = data.promptAllInOne;
+        state.settings = data.settings;
+        state.customTagCount = data.customTagCount;
+        state.assets = data.assets;
         renderStyles();
         renderModelSwitch();
         renderTree();
@@ -4533,6 +5008,7 @@ function buildPanel(node) {
         updateCounters();
         positiveTagPanel.__webuiBridgeRender?.();
         negativeTagPanel.__webuiBridgeRender?.();
+        maybeShowStartupWizard();
     });
 
     renderModelSwitch();
@@ -5802,6 +6278,15 @@ function addStyles() {
             flex: 1 1 auto;
             scrollbar-width: thin;
         }
+        .webui-bridge-card-grid.compact {
+            grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+            grid-auto-rows: 128px;
+            gap: 6px;
+        }
+        .webui-bridge-card-grid.large {
+            grid-template-columns: repeat(auto-fill, minmax(178px, 1fr));
+            grid-auto-rows: 220px;
+        }
         .webui-bridge-card {
             position: relative;
             min-height: 0;
@@ -6350,6 +6835,39 @@ function addStyles() {
         .webui-bridge-prompt-settings .webui-bridge-config-actions {
             grid-template-columns: 1fr;
         }
+        .webui-bridge-settings-panel .webui-bridge-config-actions {
+            grid-template-columns: repeat(3, 1fr);
+        }
+        .webui-bridge-startup {
+            width: min(640px, calc(100vw - 48px));
+        }
+        .webui-bridge-startup-actions {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+        .webui-bridge-startup-actions button {
+            display: grid;
+            gap: 8px;
+            min-height: 106px;
+            padding: 14px;
+            border: 1px solid #40506a;
+            border-radius: 8px;
+            background: #172132;
+            color: #edf4ff;
+            text-align: left;
+            cursor: pointer;
+        }
+        .webui-bridge-startup-actions button b {
+            font-size: 15px;
+        }
+        .webui-bridge-startup-actions button span {
+            color: #a9bdd8;
+            font-size: 12px;
+            line-height: 1.35;
+        }
+        .webui-bridge-startup-actions button:hover {
+            border-color: #5d9bff;
+            background: #1d2a40;
+        }
         .webui-bridge-config-input {
             width: 100%;
             min-height: 36px;
@@ -6390,7 +6908,16 @@ function addStyles() {
         .webui-bridge-config-actions button:hover {
             filter: brightness(1.08);
         }
+        .webui-bridge-config-actions button:disabled {
+            opacity: .62;
+            cursor: default;
+            filter: none;
+        }
         @media (max-width: 900px) {
+            .webui-bridge-startup-actions,
+            .webui-bridge-settings-panel .webui-bridge-config-actions {
+                grid-template-columns: 1fr;
+            }
             .webui-bridge-lora-edit-body {
                 grid-template-columns: 1fr;
             }
