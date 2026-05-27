@@ -15,16 +15,16 @@
 
 新用户可以先从中文最小工作流教程开始：`docs/tutorial-minimal-workflows.md`。教程分别演示 Anima 分体模型和 XL 整合 checkpoint 的最小接线，并配有截图和可直接拖入 ComfyUI 的 JSON 工作流。
 
-## v0.2.0 更新说明
+## v0.2.1 更新说明
 
-这一版主要解决大家反馈最多的 LoRA 接入、提示词保存和面板拖动问题。升级后建议重启 ComfyUI，并在浏览器里刷新页面。
+这一版在 v0.2.0 的基础上补了几个常见问题：如果右侧 `CLIP` 数字框被清空，生成时可能提示 `Failed to convert an input value to a FLOAT value`；设置里的字体大小也可能只有少部分文字变化；批量添加 LoRA 后选中框可能还残留。现在空值会自动回到 `1`，主要按钮、输入框、提示词标签和 LoRA 卡片文字都会跟随字体大小变化，添加选中 LoRA 后也会自动清空绿色选中状态。升级后建议重启 ComfyUI，并在浏览器里刷新页面。
 
 - WebUI 接入后的 LoRA 匹配更稳：会同步 WebUI/配置里的 LoRA 路径，也支持 `.lnk` 快捷方式、文件名、路径名和部分 metadata 别名匹配，减少“预览和触发词都能看到，但生成前提示 LoRA 未找到”的情况。
 - 刷新页面后 Prompt / Negative prompt / CLIP 字段错位的问题已修复，提示词保存更稳定。
 - `快速添加 LoRA` 现在可以勾选多个 LoRA，一次添加到正向提示词，并显示添加成功提示。
 - LoRA 面板折叠和拖动分隔线已优化，不会再被压成一坨，也不会折叠后留出大片空白。
 - 底部输入框更明显，按 Enter 添加提示词时默认会翻译；输入过程中不会刚打一个字就自动翻译。
-- 可以新增、修改、删除自己的提示词标签，也可以按住 Ctrl 多选多个提示词标签一起拖动。
+- 可以新增、修改、删除自己的提示词标签，也可以按住 Ctrl 多选多个提示词标签一起拖动：先按住 `Ctrl` 点选多个标签，再拖动其中任意一个被选中的标签，松手后会一起移动到新位置。
 - LoRA 权重编辑会正确修改 `<lora:name:weight>`，不会再把 LoRA 标签当普通提示词加权。
 
 本版已经在浏览器里实际验证：XL 整合模型 `waiANINSFWPONYXL_v60.safetensors`、分体 `Anima/Qwen` 模型、以及从 Anima 切回 XL 后再次生成都成功出图。
@@ -206,9 +206,10 @@ https://registry.comfy.org/nodes/comfyui-webui-prompt-bridge
 5. 在 WebUI Prompt Bridge 节点里输入中文或英文提示词。
 6. 使用翻译、标签补全、收藏和分类标签整理提示词。
 7. 如果提示词里写了 `<lora:name:weight>`，确认 LoRA 名字能被匹配到。
-8. 需要更高清时再开启 HiRes、Face Detail、Hand Detail、Model Upscale。
-9. 需要姿势或参考图时再打开对应开关。
-10. 如果想换普通 checkpoint，把模型模式开关关掉，然后在备用整合模型节点里选择 checkpoint。
+8. 需要一次移动多个提示词标签时，按住 `Ctrl` 点选多个标签，再拖动其中一个被选中的标签即可一起排序。
+9. 需要更高清时再开启 HiRes、Face Detail、Hand Detail、Model Upscale。
+10. 需要姿势或参考图时再打开对应开关。
+11. 如果想换普通 checkpoint，把模型模式开关关掉，然后在备用整合模型节点里选择 checkpoint。
 
 ## 接入本机 WebUI 数据
 

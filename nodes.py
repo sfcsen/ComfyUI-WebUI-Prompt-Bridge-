@@ -2384,6 +2384,11 @@ class WebUIPromptBridge:
         return cached
 
     def build(self, model, clip, positive_prompt, negative_prompt, default_clip_strength, fail_on_missing_lora, prompt=None, unique_id=None):
+        try:
+            default_clip_strength = float(default_clip_strength)
+        except (TypeError, ValueError):
+            default_clip_strength = 1.0
+
         positive_text, positive_loras = _parse_lora_tags(positive_prompt)
         negative_text, negative_loras = _parse_lora_tags(negative_prompt)
 

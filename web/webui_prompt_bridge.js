@@ -6,6 +6,10 @@ const PROMPT_WIDGETS = new Set(["positive_prompt", "negative_prompt", "default_c
 const EXTRA_SEPARATOR = ", ";
 const ATTENTION_STEP = 0.1;
 const EXTRA_STEP = 0.05;
+const DEFAULT_CLIP_STRENGTH = 1;
+const DEFAULT_FONT_SIZE = 12;
+const MIN_FONT_SIZE = 10;
+const MAX_FONT_SIZE = 22;
 const WORD_DELIMITERS = ",;，；、\n\r\t";
 const DEFAULT_PANEL_WIDTH = 1180;
 const DEFAULT_PANEL_HEIGHT = 1040;
@@ -483,6 +487,30 @@ function setWidgetValue(node, name, value) {
     app.graph?.setDirtyCanvas(true, true);
 }
 
+function normalizeClipStrength(value, fallback = DEFAULT_CLIP_STRENGTH) {
+    if (value === undefined || value === null) return fallback;
+    if (typeof value === "string" && value.trim() === "") return fallback;
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : fallback;
+}
+
+function repairClipStrengthWidget(node) {
+    const widget = getWidget(node, "default_clip_strength");
+    if (!widget) return DEFAULT_CLIP_STRENGTH;
+    const repaired = normalizeClipStrength(widget.value);
+    if (widget.value !== repaired) widget.value = repaired;
+    return repaired;
+}
+
+function applyPanelFontSize(panel) {
+    if (!panel?.style?.setProperty) return;
+    const size = Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, readLocalNumber("webui-bridge-font-size", DEFAULT_FONT_SIZE)));
+    panel.style.setProperty("--webui-bridge-font-size", `${size}px`);
+    panel.style.setProperty("--webui-bridge-font-size-small", `${Math.max(9, size - 1)}px`);
+    panel.style.setProperty("--webui-bridge-font-size-mini", `${Math.max(8, size - 2)}px`);
+    panel.style.setProperty("--webui-bridge-font-size-large", `${size + 1}px`);
+}
+
 function repairShiftedBridgeWidgets(node) {
     const positiveWidget = getWidget(node, "positive_prompt");
     const negativeWidget = getWidget(node, "negative_prompt");
@@ -498,7 +526,7 @@ function repairShiftedBridgeWidgets(node) {
     if (!positiveEmpty || !negativeLooksPrompt || !clipLooksPrompt) return false;
     positiveWidget.value = negative;
     negativeWidget.value = clip;
-    clipStrengthWidget.value = 1;
+    clipStrengthWidget.value = DEFAULT_CLIP_STRENGTH;
     if (failOnMissingWidget && typeof failOnMissingWidget.value !== "boolean") failOnMissingWidget.value = true;
     return true;
 }
@@ -3829,6 +3857,7 @@ function buildPanel(node) {
     const negativeWidget = getWidget(node, "negative_prompt");
     const clipStrengthWidget = getWidget(node, "default_clip_strength");
     const failOnMissingWidget = getWidget(node, "fail_on_missing_lora");
+    const initialClipStrength = repairClipStrengthWidget(node);
     const state = {
         activeTextarea: null,
         loras: [],
@@ -3971,12 +4000,22 @@ function buildPanel(node) {
         min: "-10",
         max: "10",
         step: "0.05",
-        value: clipStrengthWidget?.value ?? 1,
+        value: initialClipStrength,
         title: "Default LoRA CLIP strength when tag has no third value",
         oninput: (event) => {
             event.currentTarget.classList.remove("error");
             const value = event.currentTarget.value;
-            setWidgetValue(node, "default_clip_strength", value.trim() === "" ? "" : Number(value));
+            if (value.trim() === "") {
+                setWidgetValue(node, "default_clip_strength", DEFAULT_CLIP_STRENGTH);
+                return;
+            }
+            const numeric = Number(value);
+            if (Number.isFinite(numeric)) setWidgetValue(node, "default_clip_strength", numeric);
+        },
+        onblur: (event) => {
+            const repaired = normalizeClipStrength(event.currentTarget.value);
+            event.currentTarget.value = repaired;
+            setWidgetValue(node, "default_clip_strength", repaired);
         },
     });
     const failOnMissingInput = el("input", {
@@ -4017,6 +4056,8 @@ function buildPanel(node) {
 
     const validateNumericParameters = () => {
         const invalid = [];
+        const repairedClip = repairClipStrengthWidget(node);
+        if (numericWidgetIsInvalid(clipStrengthInput.value)) clipStrengthInput.value = repairedClip;
         clipStrengthInput.classList.remove("error");
         if (numericWidgetIsInvalid(clipStrengthInput.value)) {
             invalid.push("Bridge / CLIP");
@@ -4388,8 +4429,21 @@ function buildPanel(node) {
             { value: "normal", label: "标准" },
             { value: "large", label: "大图" },
         ]);
-        const fontSizeInput = el("input", { class: "webui-bridge-config-input", type: "number", min: "10", max: "18", step: "1" });
-        fontSizeInput.value = String(readLocalNumber("webui-bridge-font-size", 12));
+        const fontSizeInput = el("input", {
+            class: "webui-bridge-config-input",
+            type: "number",
+            min: String(MIN_FONT_SIZE),
+            max: String(MAX_FONT_SIZE),
+            step: "1",
+            oninput: (event) => {
+                const value = Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, Number(event.currentTarget.value || DEFAULT_FONT_SIZE)));
+                panel?.style?.setProperty("--webui-bridge-font-size", `${value}px`);
+                panel?.style?.setProperty("--webui-bridge-font-size-small", `${Math.max(9, value - 1)}px`);
+                panel?.style?.setProperty("--webui-bridge-font-size-mini", `${Math.max(8, value - 2)}px`);
+                panel?.style?.setProperty("--webui-bridge-font-size-large", `${value + 1}px`);
+            },
+        });
+        fontSizeInput.value = String(readLocalNumber("webui-bridge-font-size", DEFAULT_FONT_SIZE));
         const wizardToggle = el("input", { type: "checkbox" });
         wizardToggle.checked = current.show_startup_wizard;
         const statusLine = el("div", { class: "webui-bridge-config-status" }, webuiStatusText(state.webuiIntegration));
@@ -4447,8 +4501,8 @@ function buildPanel(node) {
                 });
                 state.settings = normalizeBridgeSettings(result.settings);
                 state.customTagCount = result.custom_tag_count || state.customTagCount;
-                writeLocalNumber("webui-bridge-font-size", Number(fontSizeInput.value || 12));
-                panel?.style?.setProperty("--webui-bridge-font-size", `${readLocalNumber("webui-bridge-font-size", 12)}px`);
+                writeLocalNumber("webui-bridge-font-size", Number(fontSizeInput.value || DEFAULT_FONT_SIZE));
+                applyPanelFontSize(panel);
                 await refreshBridgeData();
                 applyLayoutPreset(state.settings.layout_preset);
                 setStatus("设置已保存", { kind: "success" });
@@ -4471,7 +4525,7 @@ function buildPanel(node) {
                 el("label", {}, [el("span", {}, "布局尺寸"), layoutPreset]),
                 el("label", {}, [el("span", {}, "Tag 显示"), tagDisplay]),
                 el("label", {}, [el("span", {}, "LoRA 卡片"), loraCardSize]),
-                el("label", {}, [el("span", {}, "字体大小"), fontSizeInput]),
+                el("label", {}, [el("span", {}, "字体大小（默认 12px）"), fontSizeInput]),
                 el("label", { class: "webui-bridge-config-check" }, [
                     wizardToggle,
                     el("span", {}, "首次向导"),
@@ -4677,6 +4731,8 @@ function buildPanel(node) {
         }
         sync();
         renderPromptPanels();
+        state.selectedLoras.clear();
+        updateSelectedLoraCount();
         renderCards();
         setStatus(`已添加 ${added || items.length} 个选中 LoRA 到正向提示词`, { kind: "success" });
     };
@@ -5296,7 +5352,7 @@ function buildPanel(node) {
         extraSection,
         resizeGrip,
     ]);
-    panel.style.setProperty("--webui-bridge-font-size", `${readLocalNumber("webui-bridge-font-size", 12)}px`);
+    applyPanelFontSize(panel);
     networkPane.append(cards);
 
     function installPromptKeys(textarea, after) {
@@ -5410,6 +5466,9 @@ function installWebUIPanel(node) {
     if (!node.__webuiBridgeSerializeWrapped) {
         chainCallback(node, "onSerialize", function (data) {
             if (!data || !Array.isArray(data.widgets_values)) return;
+            if (data.widgets_values.length > 2) {
+                data.widgets_values[2] = normalizeClipStrength(data.widgets_values[2]);
+            }
             while (data.widgets_values.length > 4 && data.widgets_values[data.widgets_values.length - 1] == null) {
                 data.widgets_values.pop();
             }
@@ -7404,6 +7463,35 @@ function addStyles() {
             opacity: .62;
             cursor: default;
             filter: none;
+        }
+        .webui-bridge-panel button,
+        .webui-bridge-panel input,
+        .webui-bridge-panel select,
+        .webui-bridge-panel textarea,
+        .webui-bridge-panel .webui-bridge-prompt-label,
+        .webui-bridge-panel .webui-bridge-model-title,
+        .webui-bridge-panel .webui-bridge-aio-local,
+        .webui-bridge-panel .webui-bridge-aio-en,
+        .webui-bridge-panel .webui-bridge-aio-new,
+        .webui-bridge-panel .webui-bridge-status,
+        .webui-bridge-panel .webui-bridge-card-title,
+        .webui-bridge-panel .webui-bridge-card-trigger,
+        .webui-bridge-panel .webui-bridge-card-meta,
+        .webui-bridge-panel .webui-bridge-card-actions,
+        .webui-bridge-panel .webui-bridge-network-count,
+        .webui-bridge-panel .webui-bridge-model-count,
+        .webui-bridge-panel .webui-bridge-backend-settings,
+        .webui-bridge-panel .webui-bridge-config-status {
+            font-size: var(--webui-bridge-font-size, 12px) !important;
+        }
+        .webui-bridge-panel .webui-bridge-model-mode,
+        .webui-bridge-panel .webui-bridge-card-badge,
+        .webui-bridge-panel .webui-bridge-card-weight,
+        .webui-bridge-panel .webui-bridge-card-folder,
+        .webui-bridge-panel .webui-bridge-tree-item,
+        .webui-bridge-panel .webui-bridge-aio-fav-remove,
+        .webui-bridge-panel .webui-bridge-custom-tag-row {
+            font-size: var(--webui-bridge-font-size-small, 11px) !important;
         }
         @media (max-width: 900px) {
             .webui-bridge-startup-actions,
