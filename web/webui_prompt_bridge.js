@@ -777,6 +777,11 @@ function parseLoraTag(value) {
     };
 }
 
+function bridgeModelOutputConnected(node) {
+    const output = node?.outputs?.[0];
+    return Boolean(output?.links?.length);
+}
+
 function resolveLora(state, requested) {
     const key = normalizeLoraName(requested);
     return (state.loras || []).find((item) => (
@@ -1110,10 +1115,14 @@ function renderPromptChips(row, textarea, state, afterChange, kind = "positive")
         let title = tag.value;
         if (lora) {
             const resolved = resolveLora(state, lora.name);
+            const modelConnected = bridgeModelOutputConnected(state.bridgeNode);
             local = resolved ? `LoRA已匹配: ${resolved.alias || resolved.name}` : "LoRA未找到";
-            className += resolved ? " lora found" : " lora missing";
+            className += resolved ? (modelConnected ? " lora found" : " lora warning") : " lora missing";
+            if (resolved && !modelConnected) local = "LoRA已匹配，但model输出未接采样器";
             title = resolved
-                ? `${tag.value}\n生成时会由 WebUIPromptBridge 后端应用: ${resolved.name}`
+                ? (modelConnected
+                    ? `${tag.value}\n生成时会由 WebUIPromptBridge 后端应用: ${resolved.name}`
+                    : `${tag.value}\n只表示已找到文件: ${resolved.name}\n要让 LoRA 影响出图，需要把本节点 model 输出接到采样器使用的模型链路。`)
                 : `${tag.value}\n未在 ComfyUI loras 目录找到，fail_on_missing_lora 开启时会报错`;
         } else if (!local && /[\u3400-\u9fff]/.test(tag.value)) {
             local = "可点“英”翻译为 Anima tag";
@@ -1327,6 +1336,13 @@ function renderPromptChips(row, textarea, state, afterChange, kind = "positive")
             fetchLoraInfo(lora.name).then((info) => {
                 if (!info || !chip.isConnected) return;
                 const localNode = chip.querySelector(".webui-bridge-chip-local");
+                if (info.found && !bridgeModelOutputConnected(state.bridgeNode)) {
+                    chip.classList.remove("found", "missing");
+                    chip.classList.add("warning");
+                    if (localNode) localNode.textContent = "LoRA已匹配，但model输出未接采样器";
+                    chip.title = `${tag.value}\n只表示已找到文件: ${info.name || locallyResolved?.name || lora.name}\n要让 LoRA 影响出图，需要把本节点 model 输出接到采样器使用的模型链路。`;
+                    return;
+                }
                 if (info.found && !locallyResolved) {
                     chip.classList.remove("missing");
                     chip.classList.add("found");
@@ -1394,6 +1410,10 @@ function promptHasLora(text, name) {
         const lora = parseLoraTag(tag.value);
         return lora && normalizeLoraName(lora.name) === target;
     });
+}
+
+function promptHasAnyLora(text) {
+    return splitPromptTags(text).some((tag) => parseLoraTag(tag.value));
 }
 
 function formatLoraStrength(value, fallback = 1) {
@@ -3960,6 +3980,7 @@ function buildPanel(node) {
     const failOnMissingWidget = getWidget(node, "fail_on_missing_lora");
     const initialClipStrength = repairClipStrengthWidget(node);
     const state = {
+        bridgeNode: node,
         activeTextarea: null,
         loras: [],
         styles: [],
@@ -5482,6 +5503,15 @@ function buildPanel(node) {
         if (!validateNumericParameters()) return;
         const positiveText = positive.textarea.value.trim();
         const negativeText = negative.textarea.value.trim();
+        if (
+            (promptHasAnyLora(positiveText) || promptHasAnyLora(negativeText)) &&
+            !bridgeModelOutputConnected(node) &&
+            !collectUpstreamLoraLoaders(node).length
+        ) {
+            setStatus("LoRA 已匹配到文件，但本节点 model 输出没有接到采样器模型链路；这次 LoRA 不会影响出图。请先接 model 输出，或使用前置 LoRA Loader。", { kind: "error", sticky: true });
+            renderPromptPanels();
+            return;
+        }
         if (!positiveText && looksLikeMisplacedPositivePrompt(negativeText)) {
             showPromptPlacementWarning();
             return;
@@ -5933,6 +5963,7 @@ function buildPanel(node) {
     panel.__webuiBridgeImportUpstreamLoras = () => {
         const added = importUpstreamLoras();
         if (added) updateCounters();
+        renderPromptPanels();
     };
     return panel;
 }

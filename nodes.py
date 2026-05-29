@@ -1874,6 +1874,28 @@ def _collect_upstream_loras_from_prompt(prompt, unique_id):
     return loras
 
 
+def _prompt_output_has_consumers(prompt, unique_id, output_index):
+    if not isinstance(prompt, dict) or unique_id is None:
+        return True
+    source_id = str(unique_id)
+    for node_def in prompt.values():
+        if not isinstance(node_def, dict):
+            continue
+        for value in (node_def.get("inputs") or {}).values():
+            try:
+                linked_output = int(value[1]) if isinstance(value, (list, tuple)) and len(value) >= 2 else None
+            except (TypeError, ValueError):
+                linked_output = None
+            if (
+                isinstance(value, (list, tuple))
+                and len(value) >= 2
+                and str(value[0]) == source_id
+                and linked_output == output_index
+            ):
+                return True
+    return False
+
+
 _RE_PARAM = re.compile(r"\s*([\w \-/]+):\s*(\"(?:\\.|[^\"])*\"|[^,]+)(?:,|$)")
 _RE_IMAGE_SIZE = re.compile(r"^(\d+)[xX](\d+)$")
 
@@ -2991,6 +3013,7 @@ class WebUIPromptBridge:
         skipped_upstream = []
         missing = []
         upstream_loras = _collect_upstream_loras_from_prompt(prompt, unique_id)
+        model_output_connected = _prompt_output_has_consumers(prompt, unique_id, 0)
         for requested, strength_model, strength_clip in [*positive_loras, *negative_loras]:
             resolved = _resolve_lora_name(requested)
             if resolved is None:
@@ -3010,6 +3033,7 @@ class WebUIPromptBridge:
             lora = self._load_lora(resolved)
             model, clip = comfy.sd.load_lora_for_models(model, clip, lora, strength_model, strength_clip)
             applied.append(f"{resolved}:model={strength_model:g}:clip={strength_clip:g}")
+            print(f"[WebUIPromptBridge] Applied LoRA: {resolved} model={strength_model:g} clip={strength_clip:g}")
 
         if missing and fail_on_missing_lora:
             raise ValueError("Missing LoRA(s): " + ", ".join(missing))
@@ -3017,10 +3041,16 @@ class WebUIPromptBridge:
         positive = clip.encode_from_tokens_scheduled(clip.tokenize(positive_text))
         negative = clip.encode_from_tokens_scheduled(clip.tokenize(negative_text))
         info = "Applied LoRAs: " + (", ".join(applied) if applied else "None")
+        if applied and not model_output_connected:
+            warning = "Bridge model output is not connected; LoRA model changes will not reach the sampler"
+            info += " | Warning: " + warning
+            print(f"[WebUIPromptBridge] Warning: {warning}")
         if skipped_upstream:
             info += " | Upstream LoRAs already loaded: " + ", ".join(skipped_upstream)
+            print("[WebUIPromptBridge] Upstream LoRAs already loaded: " + ", ".join(skipped_upstream))
         if missing:
             info += " | Missing LoRAs: " + ", ".join(missing)
+            print("[WebUIPromptBridge] Missing LoRAs: " + ", ".join(missing))
 
         return (model, clip, positive, negative, positive_text, negative_text, info)
 
