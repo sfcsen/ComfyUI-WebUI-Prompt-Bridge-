@@ -1,12 +1,20 @@
 [project]
 name = "comfyui-webui-prompt-bridge"
 description = "WebUIPromptBridge / WebUI Prompt Bridge / A1111 prompt bridge for ComfyUI with Chinese translation, tag autocomplete, favorites, negative prompts, styles and real LoRA loading."
-version = "0.2.4"
+version = "0.2.5"
 license = { file = "LICENSE" }
 dependencies = [
     "pyyaml",
-    "safetensors"
+    "safetensors",
+    "requests",
+    "PyExecJS",
+    "lxml",
+    "tqdm",
+    "pathos",
+    "cryptography",
+    "chardet"
 ]
+
 requires-python = ">=3.10"
 readme = "README.md"
 authors = [
@@ -25,6 +33,14 @@ keywords = [
 [project.urls]
 Repository = "https://github.com/dianfangsihuo/ComfyUI-WebUI-Prompt-Bridge"
 Issues = "https://github.com/dianfangsihuo/ComfyUI-WebUI-Prompt-Bridge/issues"
+
+[project.optional-dependencies]
+cloud-translation = [
+    "openai",
+    "boto3",
+    "aliyun-python-sdk-core",
+    "aliyun-python-sdk-alimt"
+]
 
 [tool.comfy]
 PublisherId = "dianfangsihuo"

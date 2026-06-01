@@ -21,6 +21,8 @@ const PANEL_MIN_HEIGHT = 620;
 const DOM_WIDGET_LAYOUT_PAD = 58;
 const PROMPT_CHIPS_MIN_HEIGHT = 104;
 const EXTRA_NETWORKS_MIN_HEIGHT = 180;
+const AIO_POSITIVE_MIN_HEIGHT = 180;
+const AIO_NEGATIVE_MIN_HEIGHT = 220;
 const DEFAULT_BRIDGE_SETTINGS = {
     data_source: "auto",
     translation_source: "auto",
@@ -137,6 +139,12 @@ function el(tag, attrs = {}, children = []) {
         node.append(child instanceof Node ? child : document.createTextNode(String(child)));
     }
     return node;
+}
+
+function stripModelExtension(name) {
+    return String(name || "")
+        .replace(/\\/g, "/")
+        .replace(/\.(?:safetensors|ckpt|pt|bin)$/i, "");
 }
 
 function getWidget(node, name) {
@@ -504,13 +512,37 @@ function repairClipStrengthWidget(node) {
     return repaired;
 }
 
-function applyPanelFontSize(panel) {
+function resolvePanelFontMetrics(value) {
+    const size = Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, Number(value || DEFAULT_FONT_SIZE)));
+    const small = Math.max(9, size - 1);
+    const mini = Math.max(8, size - 2);
+    const lineHeight = Math.max(14, Math.ceil(size * 1.35));
+    const rowHeight = Math.max(18, lineHeight + 2);
+    return {
+        size,
+        small,
+        mini,
+        large: size + 1,
+        aioMain: size,
+        aioSub: small,
+        aioLineHeight: lineHeight,
+        aioRowHeight: rowHeight,
+        aioTagHeight: rowHeight * 2,
+    };
+}
+
+function applyPanelFontSize(panel, value = null) {
     if (!panel?.style?.setProperty) return;
-    const size = Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, readLocalNumber("webui-bridge-font-size", DEFAULT_FONT_SIZE)));
-    panel.style.setProperty("--webui-bridge-font-size", `${size}px`);
-    panel.style.setProperty("--webui-bridge-font-size-small", `${Math.max(9, size - 1)}px`);
-    panel.style.setProperty("--webui-bridge-font-size-mini", `${Math.max(8, size - 2)}px`);
-    panel.style.setProperty("--webui-bridge-font-size-large", `${size + 1}px`);
+    const metrics = resolvePanelFontMetrics(value ?? readLocalNumber("webui-bridge-font-size", DEFAULT_FONT_SIZE));
+    panel.style.setProperty("--webui-bridge-font-size", `${metrics.size}px`);
+    panel.style.setProperty("--webui-bridge-font-size-small", `${metrics.small}px`);
+    panel.style.setProperty("--webui-bridge-font-size-mini", `${metrics.mini}px`);
+    panel.style.setProperty("--webui-bridge-font-size-large", `${metrics.large}px`);
+    panel.style.setProperty("--webui-bridge-aio-main-size", `${metrics.aioMain}px`);
+    panel.style.setProperty("--webui-bridge-aio-sub-size", `${metrics.aioSub}px`);
+    panel.style.setProperty("--webui-bridge-aio-line-height", `${metrics.aioLineHeight}px`);
+    panel.style.setProperty("--webui-bridge-aio-row-height", `${metrics.aioRowHeight}px`);
+    panel.style.setProperty("--webui-bridge-aio-tag-height", `${metrics.aioTagHeight}px`);
 }
 
 function repairShiftedBridgeWidgets(node) {
@@ -1548,7 +1580,7 @@ async function loadBridgeData() {
         loras: lorasRes.status === "fulfilled" ? lorasRes.value.loras || [] : [],
         styles: stylesRes.status === "fulfilled" ? stylesRes.value.styles || [] : [],
         promptAllInOne: promptAllInOneRes.status === "fulfilled" ? promptAllInOneRes.value : { group_tags: [], favorites: {} },
-        models: modelsRes.status === "fulfilled" ? modelsRes.value : { checkpoints: [], unets: [], clips: [], vaes: [] },
+        models: modelsRes.status === "fulfilled" ? modelsRes.value : { checkpoints: [], unets: [], clips: [], vaes: [], embeddings: [] },
         webuiIntegration: webuiRes.status === "fulfilled" ? webuiRes.value : null,
         settings: normalizeBridgeSettings(settingsRes.status === "fulfilled" ? settingsRes.value.settings : null),
         customTagCount: settingsRes.status === "fulfilled" ? settingsRes.value.custom_tag_count || 0 : 0,
@@ -3185,6 +3217,7 @@ async function resolveKeywordInput(value, autoTranslate = true) {
 
 function installAutocomplete(input, options) {
     const popup = el("div", { class: "webui-bridge-autocomplete" });
+    if (options.compact) popup.classList.add("compact");
     input.__webuiBridgeAutocompletePopup = popup;
     input.__webuiBridgePickAutocomplete = () => pick(activeIndex);
     document.body.append(popup);
@@ -3216,9 +3249,14 @@ function installAutocomplete(input, options) {
     };
     const position = () => {
         const rect = input.getBoundingClientRect();
-        popup.style.left = `${Math.round(rect.left)}px`;
+        const minWidth = options.popupMinWidth || 260;
+        const maxWidth = options.popupMaxWidth || Math.max(minWidth, Math.round(rect.width));
+        const width = Math.min(Math.max(minWidth, Math.round(rect.width)), maxWidth);
+        const left = Math.max(8, Math.min(Math.round(rect.left), window.innerWidth - width - 12));
+        popup.style.left = `${left}px`;
         popup.style.top = `${Math.round(rect.bottom + 4)}px`;
-        popup.style.minWidth = `${Math.max(260, Math.round(rect.width))}px`;
+        popup.style.width = `${width}px`;
+        if (options.popupMaxHeight) popup.style.maxHeight = `${options.popupMaxHeight}px`;
     };
     const render = (items) => {
         lastItems = items || [];
@@ -3556,7 +3594,7 @@ function createTagButton(tag, textarea, sync, rerender, isNegative = false, stat
             ]
             : [
                 el("span", { class: "webui-bridge-aio-local" }, label || prompt),
-                el("span", { class: "webui-bridge-aio-en" }, prompt),
+                label && label !== prompt ? el("span", { class: "webui-bridge-aio-en" }, prompt) : null,
             ];
     if (tag.favoriteItem && tag.id && state) {
         children.push(el("span", {
@@ -3615,9 +3653,9 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
     const showInput = el("input", { type: "checkbox", title: "显示默认输入框" });
     const panelHeightKey = `webui-bridge-aio-panel-height-${kind}`;
     root.__webuiBridgeHeightKey = panelHeightKey;
-    root.__webuiBridgeMinHeight = kind === "negative" ? 110 : 130;
+    root.__webuiBridgeMinHeight = kind === "negative" ? AIO_NEGATIVE_MIN_HEIGHT : AIO_POSITIVE_MIN_HEIGHT;
     root.__webuiBridgeMaxHeight = 680;
-    applyStoredHeight(root, panelHeightKey, { min: kind === "negative" ? 110 : 130, max: 680 });
+    applyStoredHeight(root, panelHeightKey, { min: root.__webuiBridgeMinHeight, max: 680 });
     const toggles = el("div", { class: "webui-bridge-aio-toggles" }, [
         autoLoad,
         autoTranslate,
@@ -3821,7 +3859,7 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
         body,
         hint,
         colorRow,
-        createHeightResizeGrip(root, panelHeightKey, { min: kind === "negative" ? 110 : 130, max: 680, title: "拖动调整收藏/标签列表高度，双击恢复" }),
+        createHeightResizeGrip(root, panelHeightKey, { min: root.__webuiBridgeMinHeight, max: 680, title: "拖动调整收藏/标签列表高度，双击恢复" }),
     );
 
     let groups = [];
@@ -3856,29 +3894,44 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
                 })),
             }],
         };
+        const embeddingItems = state.models?.embeddings || [];
         const extraGroup = {
             name: "扩展模型",
             type: "extraNetworks",
-            groups: [{
-                name: "Lora",
-                tags: state.loras.map((item) => ({
-                    prompt: item.prompt,
-                    local: loraDisplayName(item),
-                    name: item.name,
-                })),
-            }],
+            groups: [
+                {
+                    name: "Lora",
+                    tags: state.loras.map((item) => ({
+                        prompt: item.prompt,
+                        local: loraDisplayName(item),
+                        name: item.name,
+                    })),
+                },
+                {
+                    name: "Embedding",
+                    tags: embeddingItems.map((name) => {
+                        const prompt = stripModelExtension(name).split("/").pop();
+                        return {
+                            prompt,
+                            local: prompt,
+                            name,
+                        };
+                    }).filter((item) => item.prompt),
+                },
+            ],
         };
         const sourceGroups = (state.promptAllInOne?.group_tags || []).filter((group) => {
             if (kind === "negative") return group.name === "反向提示词";
             return group.name !== "反向提示词";
         });
         groups = [...sourceGroups, favoriteGroup, extraGroup];
-        if (kind === "negative") {
+        if (kind === "negative" && !root.__webuiBridgeInitializedTabs) {
             const negIndex = groups.findIndex((group) => group.name === "反向提示词");
             if (negIndex >= 0) activeGroup = negIndex;
         }
         activeGroup = Math.min(activeGroup, Math.max(groups.length - 1, 0));
         activeSubGroup = Math.min(activeSubGroup, Math.max((groups[activeGroup]?.groups || []).filter((g) => g.type !== "wrap").length - 1, 0));
+        root.__webuiBridgeInitializedTabs = true;
     };
 
     function renderTabs() {
@@ -3921,6 +3974,10 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
             if (!q) return true;
             return String(tag.prompt || "").toLowerCase().includes(q) || String(tag.local || "").toLowerCase().includes(q);
         });
+        if (!tags.length) {
+            body.append(el("div", { class: "webui-bridge-aio-empty" }, q ? "没有匹配的标签" : "这个分组目前没有标签"));
+            return;
+        }
         tags.slice(0, 260).forEach((tag) => body.append(createTagButton(tag, textarea, sync, renderBody, isNegative, state)));
     }
 
@@ -3958,6 +4015,10 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
     });
     installAutocomplete(query, {
         limit: 8,
+        compact: true,
+        popupMinWidth: 220,
+        popupMaxWidth: 440,
+        popupMaxHeight: 224,
         onPick: async (item) => {
             await updatePromptAreaWithLoraKeywords(textarea, item.text, isNegative, sync, (message) => {
                 hint.textContent = message;
@@ -3984,7 +4045,7 @@ function buildPanel(node) {
         activeTextarea: null,
         loras: [],
         styles: [],
-        models: { checkpoints: [], unets: [], clips: [], vaes: [] },
+        models: { checkpoints: [], unets: [], clips: [], vaes: [], embeddings: [] },
         webuiIntegration: null,
         promptAllInOne: { group_tags: [], favorites: {} },
         settings: normalizeBridgeSettings(),
@@ -4959,10 +5020,7 @@ function buildPanel(node) {
             step: "1",
             oninput: (event) => {
                 const value = Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, Number(event.currentTarget.value || DEFAULT_FONT_SIZE)));
-                panel?.style?.setProperty("--webui-bridge-font-size", `${value}px`);
-                panel?.style?.setProperty("--webui-bridge-font-size-small", `${Math.max(9, value - 1)}px`);
-                panel?.style?.setProperty("--webui-bridge-font-size-mini", `${Math.max(8, value - 2)}px`);
-                panel?.style?.setProperty("--webui-bridge-font-size-large", `${value + 1}px`);
+                applyPanelFontSize(panel, value);
             },
         });
         fontSizeInput.value = String(readLocalNumber("webui-bridge-font-size", DEFAULT_FONT_SIZE));
@@ -6665,12 +6723,12 @@ function addStyles() {
             flex-direction: column;
         }
         .webui-bridge-aio-positive {
-            min-height: 150px;
-            height: 190px;
+            min-height: 180px;
+            height: 220px;
         }
         .webui-bridge-aio-negative {
-            min-height: 120px;
-            height: 150px;
+            min-height: 220px;
+            height: 240px;
         }
         .webui-bridge-aio-header {
             display: flex;
@@ -6699,8 +6757,8 @@ function addStyles() {
             position: relative;
             display: grid;
             grid-template-columns: minmax(0, 1fr) 28px;
-            gap: 6px;
-            padding: 7px 8px;
+            gap: 5px;
+            padding: 5px 7px;
             border-bottom: 1px solid #263243;
             background: #101927;
             box-shadow: inset 0 0 0 1px rgba(106, 163, 255, .12);
@@ -6776,14 +6834,14 @@ function addStyles() {
         .webui-bridge-aio-new {
             width: 100%;
             min-width: 0;
-            height: 32px;
+            height: 28px;
             box-sizing: border-box;
-            padding: 5px 10px;
+            padding: 4px 9px;
             border: 1px solid #57739c;
             border-radius: 5px;
             background: #07101d;
             color: #f2f4f8;
-            font-size: 13px;
+            font-size: 12px;
             outline: none;
         }
         .webui-bridge-aio-new::placeholder {
@@ -6795,7 +6853,7 @@ function addStyles() {
         }
         .webui-bridge-aio-add {
             width: 28px;
-            height: 32px;
+            height: 28px;
             border: 1px solid #39475c;
             border-radius: 4px;
             background: #242b38;
@@ -6809,24 +6867,24 @@ function addStyles() {
             overflow-x: auto;
             scrollbar-width: thin;
             background: #202631;
-            min-height: 30px;
+            min-height: 26px;
             border-bottom: 1px solid #2d3542;
         }
         .webui-bridge-aio-subtabs {
             background: #141a24;
-            min-height: 28px;
+            min-height: 24px;
         }
         .webui-bridge-aio-tabs button,
         .webui-bridge-aio-subtabs button {
             flex: 0 0 auto;
-            min-height: 28px;
-            padding: 4px 10px;
+            min-height: 24px;
+            padding: 3px 8px;
             border: 0;
             border-right: 1px solid #2d3542;
             background: transparent;
             color: #d6deec;
             cursor: pointer;
-            font-size: 12px;
+            font-size: 11px;
             white-space: nowrap;
         }
         .webui-bridge-aio-tabs button.active,
@@ -6843,21 +6901,33 @@ function addStyles() {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(clamp(92px, 12%, 132px), 1fr));
             align-content: start;
-            gap: 6px;
+            gap: 5px;
             flex: 1 1 auto;
-            min-height: 0;
-            padding: 8px;
+            min-height: 72px;
+            padding: 6px;
             overflow: auto;
         }
         .webui-bridge-aio-positive .webui-bridge-aio-body {
-            min-height: 0;
+            min-height: 72px;
         }
         .webui-bridge-aio-negative .webui-bridge-aio-body {
-            min-height: 0;
+            min-height: 72px;
+        }
+        .webui-bridge-aio-empty {
+            grid-column: 1 / -1;
+            min-height: 52px;
+            display: grid;
+            place-items: center;
+            border: 1px dashed #2f4057;
+            border-radius: 5px;
+            color: #9fb4d0;
+            background: rgba(15, 23, 36, .72);
+            font-size: 12px;
         }
         .webui-bridge-aio-tag {
             position: relative;
-            height: 38px;
+            min-height: var(--webui-bridge-aio-tag-height, 38px);
+            height: auto;
             padding: 0;
             border: 1px solid #202838;
             border-radius: 4px;
@@ -6895,8 +6965,9 @@ function addStyles() {
         .webui-bridge-aio-local,
         .webui-bridge-aio-en {
             display: block;
-            height: 20px;
-            padding: 2px 6px;
+            height: var(--webui-bridge-aio-row-height, 19px);
+            line-height: var(--webui-bridge-aio-line-height, 17px);
+            padding: 0 6px;
             box-sizing: border-box;
             text-align: center;
             overflow: hidden;
@@ -6906,11 +6977,11 @@ function addStyles() {
         .webui-bridge-aio-local {
             background: #5d5b3d;
             color: #fffbd0;
-            font-size: 12px;
+            font-size: var(--webui-bridge-aio-main-size, 12px);
         }
         .webui-bridge-aio-en {
             color: #cbd3df;
-            font-size: 11px;
+            font-size: var(--webui-bridge-aio-sub-size, 11px);
         }
         .webui-bridge-aio-color {
             display: none;
@@ -7470,6 +7541,11 @@ function addStyles() {
             padding: 4px;
             box-sizing: border-box;
         }
+        .webui-bridge-autocomplete.compact {
+            max-height: 224px;
+            border-radius: 6px;
+            padding: 3px;
+        }
         .webui-bridge-autocomplete.visible {
             display: flex;
             flex-direction: column;
@@ -7487,6 +7563,13 @@ function addStyles() {
             text-align: left;
             cursor: pointer;
         }
+        .webui-bridge-autocomplete.compact button {
+            grid-template-rows: 17px 15px;
+            gap: 0 8px;
+            min-height: 40px;
+            padding: 4px 8px 5px;
+            border-radius: 4px;
+        }
         .webui-bridge-autocomplete button.active,
         .webui-bridge-autocomplete button:hover {
             background: #1d2a3b;
@@ -7498,6 +7581,9 @@ function addStyles() {
             text-overflow: ellipsis;
             white-space: nowrap;
         }
+        .webui-bridge-autocomplete.compact .webui-bridge-ac-main {
+            font: 12px/17px Consolas, Monaco, monospace;
+        }
         .webui-bridge-ac-local {
             grid-column: 1;
             color: #91b2c9;
@@ -7506,6 +7592,10 @@ function addStyles() {
             text-overflow: ellipsis;
             white-space: nowrap;
         }
+        .webui-bridge-autocomplete.compact .webui-bridge-ac-local {
+            font-size: 10px;
+            line-height: 15px;
+        }
         .webui-bridge-ac-count {
             grid-column: 2;
             grid-row: 1 / span 2;
@@ -7513,6 +7603,9 @@ function addStyles() {
             color: #8c97a6;
             font-size: 13px;
             white-space: nowrap;
+        }
+        .webui-bridge-autocomplete.compact .webui-bridge-ac-count {
+            font-size: 11px;
         }
         @container (max-width: 860px) {
             .webui-bridge-panel {
@@ -8179,8 +8272,6 @@ function addStyles() {
         .webui-bridge-panel textarea,
         .webui-bridge-panel .webui-bridge-prompt-label,
         .webui-bridge-panel .webui-bridge-model-title,
-        .webui-bridge-panel .webui-bridge-aio-local,
-        .webui-bridge-panel .webui-bridge-aio-en,
         .webui-bridge-panel .webui-bridge-aio-new,
         .webui-bridge-panel .webui-bridge-status,
         .webui-bridge-panel .webui-bridge-card-title,

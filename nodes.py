@@ -616,16 +616,24 @@ def _apply_local_config(config):
 
 def _webui_integration_status(webui_root=None):
     root = _existing_path(webui_root) or WEBUI_ROOT
-    config = _build_webui_config(root) if root else {}
+    config = {}
+    error = ""
+    if root:
+        try:
+            config = _build_webui_config(root)
+        except ValueError as exc:
+            error = str(exc)
+            root = None
     detected = _detect_webui_paths(root) if root else {}
     checks = {}
     for key in ("styles_file", "prompt_all_in_one_dir", "tagcomplete_dir", "webui_python_site_packages", "loras", "checkpoints", "vae", "embeddings", "controlnet"):
         path = detected.get(key) if detected else config.get(key)
         checks[key] = {"path": _path_text(path), "exists": bool(_existing_path(path))}
     return {
-        "configured": bool(WEBUI_ROOT),
+        "configured": bool(root),
         "webui_root": _path_text(root),
         "config_path": _path_text(LOCAL_CONFIG_PATH),
+        "error": error,
         "checks": checks,
     }
 
@@ -673,15 +681,19 @@ def _discover_webui_root():
     prompt_dir = _configured_path("prompt_all_in_one_dir", "WEBUI_PROMPT_BRIDGE_PROMPT_ALL_IN_ONE_DIR")
     if prompt_dir:
         try:
-            return prompt_dir.parents[1]
+            root = prompt_dir.parents[1]
+            if _looks_like_webui_root(root):
+                return root
         except IndexError:
-            return None
+            pass
     tag_dir = _configured_path("tagcomplete_dir", "WEBUI_PROMPT_BRIDGE_TAGCOMPLETE_DIR")
     if tag_dir:
         try:
-            return tag_dir.parents[1]
+            root = tag_dir.parents[1]
+            if _looks_like_webui_root(root):
+                return root
         except IndexError:
-            return None
+            pass
     return None
 
 
@@ -1266,7 +1278,6 @@ def _webui_network_translate(text, from_lang="zh_CN", to_lang="en_US"):
             pass
         translate_script = PROMPT_ALL_IN_ONE_DIR / "scripts" / "physton_prompt" / "translate.py"
     if not translate_script.exists():
-        _NETWORK_TRANSLATE_CACHE[cache_key] = ""
         return ""
 
     added_paths = []
@@ -1294,7 +1305,6 @@ def _webui_network_translate(text, from_lang="zh_CN", to_lang="en_US"):
             return translated
     except Exception:
         pass
-    _NETWORK_TRANSLATE_CACHE[cache_key] = ""
     return ""
 
 
@@ -3281,6 +3291,7 @@ def _register_routes():
             "unets": filenames("unet") or filenames("diffusion_models"),
             "clips": filenames("clip"),
             "vaes": filenames("vae"),
+            "embeddings": filenames("embeddings"),
         })
 
     @routes.get("/webui_prompt_bridge/loras")
