@@ -36,7 +36,7 @@ const SETTING_CHOICES = {
     data_source: ["auto", "webui", "builtin"],
     translation_source: ["auto", "webui", "online", "ai", "builtin"],
     tag_translation_source: ["auto", "local", "online", "off"],
-    layout_preset: ["default", "compact", "roomy"],
+    layout_preset: ["default", "compact", "roomy", "positive_focus", "minimal_lora"],
     tag_display: ["local_first", "prompt_first", "compact"],
     lora_card_size: ["compact", "normal", "large"],
 };
@@ -49,6 +49,13 @@ const DEFAULT_QUALITY_TAGS = [
     "anime style",
 ];
 const DEFAULT_NEGATIVE_PROMPT = "worst quality, low quality, lowres, blurry, bad anatomy, bad hands, extra fingers, extra legs, bad feet, malformed feet, text, watermark, artist name, jpeg artifacts, deformed, ugly face";
+const LAYOUT_PRESET_OPTIONS = [
+    { value: "default", label: "默认", short: "默认", title: "默认布局尺寸" },
+    { value: "compact", label: "紧凑", short: "紧凑", title: "紧凑节点尺寸" },
+    { value: "roomy", label: "宽松", short: "宽松", title: "宽松大面板" },
+    { value: "positive_focus", label: "正向撰写优先", short: "正向", title: "放大正向 Prompt 和正向标签区，折叠反向词细节" },
+    { value: "minimal_lora", label: "隐藏 LoRA 最小化", short: "极简", title: "折叠 LoRA 卡片并缩小节点，适合只写提示词" },
+];
 const POSITIVE_PROMPT_HINTS = [
     "1girl",
     "1boy",
@@ -4450,9 +4457,61 @@ function buildPanel(node) {
         rootInput.select();
     };
 
+    let quickLoraOverlayButton = null;
     const applyLayoutPreset = (preset) => {
-        if (preset === "compact") setNodeSize(900, 700);
-        else if (preset === "roomy") setNodeSize(1320, 1180);
+        if (quickLoraOverlayButton) {
+            quickLoraOverlayButton.style.display = preset === "minimal_lora" ? "none" : "";
+        }
+        const collapseNegative = (collapsed) => {
+            negative.row.classList.toggle("collapsed", collapsed);
+            promptsColumn?.classList?.toggle("negative-collapsed", collapsed);
+            applyTopRowCollapsedState(topRow, collapsed);
+        };
+        if (preset === "compact") {
+            setNodeSize(900, 700);
+            collapseNegative(false);
+            extraCollapsed = false;
+            writeLocalBoolean(extraCollapsedKey, false);
+            applyExtraCollapsedState?.();
+        } else if (preset === "roomy") {
+            setNodeSize(1320, 1180);
+            collapseNegative(false);
+            extraCollapsed = false;
+            writeLocalBoolean(extraCollapsedKey, false);
+            applyExtraCollapsedState?.();
+            requestAnimationFrame(() => {
+                setResizeTargetHeight(positive.textarea, positive.textarea.__webuiBridgeHeightKey, 120, { min: 48, max: 520 });
+                setResizeTargetHeight(positiveTagPanel, positiveTagPanel.__webuiBridgeHeightKey, 280, { min: positiveTagPanel.__webuiBridgeMinHeight, max: positiveTagPanel.__webuiBridgeMaxHeight });
+                setResizeTargetHeight(extraSection, extraHeightKey, 300, { min: EXTRA_NETWORKS_MIN_HEIGHT, max: extraSection.__webuiBridgeMaxHeight });
+            });
+        } else if (preset === "positive_focus") {
+            setNodeSize(1180, 980);
+            collapseNegative(true);
+            extraCollapsed = false;
+            writeLocalBoolean(extraCollapsedKey, false);
+            applyExtraCollapsedState?.();
+            requestAnimationFrame(() => {
+                setResizeTargetHeight(positive.textarea, positive.textarea.__webuiBridgeHeightKey, 170, { min: 48, max: 520 });
+                setResizeTargetHeight(positiveTagPanel, positiveTagPanel.__webuiBridgeHeightKey, 360, { min: positiveTagPanel.__webuiBridgeMinHeight, max: positiveTagPanel.__webuiBridgeMaxHeight });
+                setResizeTargetHeight(extraSection, extraHeightKey, 220, { min: EXTRA_NETWORKS_MIN_HEIGHT, max: extraSection.__webuiBridgeMaxHeight });
+            });
+        } else if (preset === "minimal_lora") {
+            setNodeSize(940, 700);
+            collapseNegative(true);
+            extraCollapsed = true;
+            writeLocalBoolean(extraCollapsedKey, true);
+            applyExtraCollapsedState?.();
+            requestAnimationFrame(() => {
+                setResizeTargetHeight(positive.textarea, positive.textarea.__webuiBridgeHeightKey, 150, { min: 48, max: 520 });
+                setResizeTargetHeight(positiveTagPanel, positiveTagPanel.__webuiBridgeHeightKey, 260, { min: positiveTagPanel.__webuiBridgeMinHeight, max: positiveTagPanel.__webuiBridgeMaxHeight });
+            });
+        } else {
+            setNodeSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT);
+            collapseNegative(false);
+            extraCollapsed = false;
+            writeLocalBoolean(extraCollapsedKey, false);
+            applyExtraCollapsedState?.();
+        }
     };
 
     const settingSelect = (value, options) => el("select", { class: "webui-bridge-config-input" }, options.map((item) => (
@@ -4997,11 +5056,7 @@ function buildPanel(node) {
             { value: "online", label: "联网补全中文" },
             { value: "off", label: "关闭中文解释" },
         ]);
-        const layoutPreset = settingSelect(current.layout_preset, [
-            { value: "default", label: "默认" },
-            { value: "compact", label: "紧凑" },
-            { value: "roomy", label: "宽松" },
-        ]);
+        const layoutPreset = settingSelect(current.layout_preset, LAYOUT_PRESET_OPTIONS.map(({ value, label }) => ({ value, label })));
         const tagDisplay = settingSelect(current.tag_display, [
             { value: "local_first", label: "中文优先" },
             { value: "prompt_first", label: "英文优先" },
@@ -5710,6 +5765,35 @@ function buildPanel(node) {
         el("button", { title: "Larger node", onclick: () => resizeNode(120, 90) }, "+"),
         el("button", { title: "Fit default size", onclick: () => setNodeSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT) }, "Fit"),
     ]);
+    let layoutPresetControls = null;
+    const updateLayoutPresetControls = () => {
+        const active = state.settings?.layout_preset || "default";
+        for (const button of layoutPresetControls?.querySelectorAll?.(".webui-bridge-layout-preset") || []) {
+            button.classList.toggle("active", button.dataset.preset === active);
+        }
+    };
+    const applyAndSaveLayoutPreset = async (preset) => {
+        const nextSettings = { ...normalizeBridgeSettings(state.settings), layout_preset: preset };
+        state.settings = nextSettings;
+        updateLayoutPresetControls();
+        applyLayoutPreset(preset);
+        try {
+            const result = await saveBridgeSettings(nextSettings);
+            state.settings = normalizeBridgeSettings(result.settings);
+            state.customTagCount = result.custom_tag_count || state.customTagCount;
+            updateLayoutPresetControls();
+            setStatus(`已切换布局: ${LAYOUT_PRESET_OPTIONS.find((item) => item.value === preset)?.label || preset}`, { kind: "success" });
+        } catch (error) {
+            setStatus(`布局保存失败: ${error?.message || error}`, { kind: "error" });
+        }
+    };
+    layoutPresetControls = el("div", { class: "webui-bridge-layout-presets" }, LAYOUT_PRESET_OPTIONS.map((item) => el("button", {
+        class: `webui-bridge-layout-preset${state.settings?.layout_preset === item.value ? " active" : ""}`,
+        type: "button",
+        title: item.title,
+        "data-preset": item.value,
+        onclick: () => applyAndSaveLayoutPreset(item.value),
+    }, item.short)));
     const makeNetworkSortButton = (key, label, title) => el("button", {
         class: `webui-bridge-network-tool${state.loraSort === key ? " active" : ""}`,
         title,
@@ -5894,6 +5978,7 @@ function buildPanel(node) {
             modelSwitchControls,
             animaModeControls,
             sizeControls,
+            layoutPresetControls,
             toolbar,
             el("div", { class: "webui-bridge-backend-settings" }, [
                 el("button", {
@@ -5902,7 +5987,7 @@ function buildPanel(node) {
                     title: "只填写 WebUI 根目录，自动接入 Prompt All in One、TagComplete、styles、LoRA 和模型目录",
                     onclick: showWebUIIntegrationDialog,
                 }, "一键接入 WebUI"),
-                el("button", {
+                quickLoraOverlayButton = el("button", {
                     class: "webui-bridge-config-button",
                     type: "button",
                     title: "打开 LoRA / LyCORIS 浮层，添加完成后可关闭让节点更紧凑",
@@ -6010,8 +6095,12 @@ function buildPanel(node) {
         renderCards();
         importUpstreamLoras();
         updateCounters();
+        updateLayoutPresetControls();
         positiveTagPanel.__webuiBridgeRender?.();
         negativeTagPanel.__webuiBridgeRender?.();
+        if (state.settings?.layout_preset && state.settings.layout_preset !== "default") {
+            requestAnimationFrame(() => applyLayoutPreset(state.settings.layout_preset));
+        }
         maybeShowStartupWizard();
     });
 
@@ -6285,6 +6374,41 @@ function addStyles() {
         .webui-bridge-mode-controls button:hover {
             border-color: #8bb9ff;
             filter: brightness(1.12);
+        }
+        .webui-bridge-layout-presets {
+            display: grid;
+            grid-template-columns: repeat(5, minmax(0, 1fr));
+            gap: 4px;
+            padding: 5px;
+            border: 1px solid #3d4a5d;
+            border-radius: 6px;
+            background: #151c27;
+        }
+        .webui-bridge-layout-preset {
+            min-width: 0;
+            height: 28px;
+            padding: 3px 4px;
+            border: 1px solid #435066;
+            border-radius: 5px;
+            background: #202733;
+            color: #d9e2ee;
+            cursor: pointer;
+            font-size: 11px;
+            line-height: 1;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .webui-bridge-layout-preset:hover {
+            border-color: #7fb0ff;
+            background: #273348;
+            color: #fff;
+        }
+        .webui-bridge-layout-preset.active {
+            border-color: #7db2ff;
+            background: #1b3f6d;
+            color: #f6fbff;
+            box-shadow: inset 0 0 0 1px rgba(130, 180, 255, .22);
         }
         .webui-bridge-model-switch {
             display: grid;

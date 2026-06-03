@@ -59,7 +59,7 @@ _SETTING_CHOICES = {
     "data_source": {"auto", "webui", "builtin"},
     "translation_source": {"auto", "webui", "online", "ai", "builtin"},
     "tag_translation_source": {"auto", "local", "online", "off"},
-    "layout_preset": {"default", "compact", "roomy"},
+    "layout_preset": {"default", "compact", "roomy", "positive_focus", "minimal_lora"},
     "tag_display": {"local_first", "prompt_first", "compact"},
     "lora_card_size": {"compact", "normal", "large"},
 }
