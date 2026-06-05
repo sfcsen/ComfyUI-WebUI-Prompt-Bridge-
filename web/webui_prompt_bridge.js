@@ -15,13 +15,14 @@ const DEFAULT_PANEL_WIDTH = 1180;
 const DEFAULT_PANEL_HEIGHT = 1040;
 const LEGACY_PANEL_WIDTH = 1280;
 const LEGACY_PANEL_HEIGHT = 1120;
-const PANEL_MIN_WIDTH = 760;
-const PANEL_MAX_WIDTH = 1600;
-const PANEL_MIN_HEIGHT = 620;
+const PANEL_MIN_WIDTH = 420;
+const PANEL_MAX_WIDTH = 100000;
+const PANEL_MIN_HEIGHT = 360;
 const DOM_WIDGET_LAYOUT_PAD = 58;
 const PROMPT_CHIPS_MIN_HEIGHT = 104;
-const EXTRA_NETWORKS_MIN_HEIGHT = 180;
-const EXTRA_NETWORKS_MAX_HEIGHT = 420;
+const EXTRA_NETWORKS_MIN_HEIGHT = 72;
+const EXTRA_NETWORKS_MAX_HEIGHT = 100000;
+const LAYOUT_STORAGE_VERSION = "2026-06-05-anchored-resizable-frames";
 const AIO_POSITIVE_MIN_HEIGHT = 180;
 const AIO_NEGATIVE_MIN_HEIGHT = 220;
 const DEFAULT_BRIDGE_SETTINGS = {
@@ -66,7 +67,7 @@ const LAYOUT_PRESET_OPTIONS = [
     { value: "compact", label: "紧凑", short: "紧凑", title: "紧凑节点尺寸" },
     { value: "roomy", label: "宽松", short: "宽松", title: "宽松大面板" },
     { value: "positive_focus", label: "正向撰写优先", short: "正向", title: "放大正向 Prompt 和正向标签区，折叠反向词细节" },
-    { value: "minimal_lora", label: "隐藏 LoRA 最小化", short: "极简", title: "折叠 LoRA 卡片并缩小节点，适合只写提示词" },
+    { value: "minimal_lora", label: "极简 LoRA 条", short: "极简", title: "压缩 LoRA 卡片区并缩小节点，保留底部框可随时拉开" },
 ];
 const POSITIVE_PROMPT_HINTS = [
     "1girl",
@@ -300,6 +301,18 @@ function resizeTargetMax(target, fallback) {
     return Number(resolveResizeValue(fallback) ?? target?.__webuiBridgeMaxHeight ?? 640);
 }
 
+function resizeTargetLayoutHeight(target) {
+    if (!target) return 0;
+    return target.offsetHeight || target.getBoundingClientRect?.().height || 0;
+}
+
+function resizeTargetViewportScale(target) {
+    const layoutHeight = target?.offsetHeight || 0;
+    const viewportHeight = target?.getBoundingClientRect?.().height || 0;
+    if (!layoutHeight || !viewportHeight) return 1;
+    return viewportHeight / layoutHeight || 1;
+}
+
 function setResizeTargetHeight(target, storageKey, height, { min = 48, max = 640 } = {}) {
     if (!target) return;
     const nextHeight = clampNumber(height, min, max);
@@ -344,10 +357,12 @@ function createHeightResizeGrip(target, storageKey, { min = 48, max = 640, title
             event.preventDefault();
             event.stopPropagation();
             const startY = event.clientY;
-            const startHeight = target.getBoundingClientRect().height;
+            const startHeight = resizeTargetLayoutHeight(target);
+            const viewportScale = resizeTargetViewportScale(target);
             grip.setPointerCapture?.(event.pointerId);
             const onMove = (moveEvent) => {
-                setResizeTargetHeight(target, storageKey, startHeight + moveEvent.clientY - startY, { min, max });
+                const delta = (moveEvent.clientY - startY) / viewportScale;
+                setResizeTargetHeight(target, storageKey, startHeight + delta, { min, max });
             };
             const onUp = () => {
                 document.removeEventListener("pointermove", onMove, true);
@@ -372,7 +387,7 @@ function createHeightSplitGrip(beforeTarget, afterTarget, beforeKey, afterKey, o
             resetResizeTargetHeight(resolveResizeValue(beforeTarget), beforeKey);
             const after = resolveResizeValue(afterTarget);
             if (!resizeTargetHidden(after)) {
-                resetResizeTargetHeight(after, afterKey, options.fillAfter ? "1 1 0" : "");
+                resetResizeTargetHeight(after, afterKey, options.fillAfter ? "1 1 0" : (options.afterFlex || ""));
             }
         },
         onpointerdown: (event) => {
@@ -387,13 +402,14 @@ function createHeightSplitGrip(beforeTarget, afterTarget, beforeKey, afterKey, o
             const afterMin = resizeTargetMin(after, options.afterMin ?? options.min);
             const afterMax = resizeTargetMax(after, options.afterMax ?? options.max);
             const startY = event.clientY;
-            const startBefore = before.getBoundingClientRect().height;
-            const startAfter = afterVisible ? after.getBoundingClientRect().height : 0;
+            const startBefore = resizeTargetLayoutHeight(before);
+            const startAfter = afterVisible ? resizeTargetLayoutHeight(after) : 0;
+            const viewportScale = resizeTargetViewportScale(before);
             const total = startBefore + startAfter;
             let moved = false;
             grip.setPointerCapture?.(event.pointerId);
             const onMove = (moveEvent) => {
-                const delta = moveEvent.clientY - startY;
+                const delta = (moveEvent.clientY - startY) / viewportScale;
                 if (!moved && Math.abs(delta) < 4) return;
                 moved = true;
                 const rawBefore = startBefore + delta;
@@ -410,6 +426,7 @@ function createHeightSplitGrip(beforeTarget, afterTarget, beforeKey, afterKey, o
                 } else {
                     const nextAfter = total - nextBefore;
                     setResizeTargetHeight(after, afterKey, nextAfter, { min: afterMin, max: afterMax });
+                    if (options.afterFlex) after.style.flex = options.afterFlex;
                 }
             };
             const onUp = () => {
@@ -427,9 +444,15 @@ function createHeightSplitGrip(beforeTarget, afterTarget, beforeKey, afterKey, o
 
 function clampPanelSize(width, height) {
     const nextHeight = Math.max(PANEL_MIN_HEIGHT, Math.round(height || DEFAULT_PANEL_HEIGHT));
-    const ratioWidth = Math.ceil(nextHeight * 0.78);
-    const nextWidth = Math.min(PANEL_MAX_WIDTH, Math.max(PANEL_MIN_WIDTH, Math.round(width || DEFAULT_PANEL_WIDTH), ratioWidth));
+    const nextWidth = Math.min(PANEL_MAX_WIDTH, Math.max(PANEL_MIN_WIDTH, Math.round(width || DEFAULT_PANEL_WIDTH)));
     return [nextWidth, nextHeight];
+}
+
+function migrateLayoutStorage(keys = []) {
+    const versionKey = "webui-bridge-layout-storage-version";
+    if (readLocalString(versionKey, "") === LAYOUT_STORAGE_VERSION) return;
+    for (const key of keys) clearLocalValue(key);
+    writeLocalString(versionKey, LAYOUT_STORAGE_VERSION);
 }
 
 function looksLikeLegacyDefaultSize(size) {
@@ -4099,6 +4122,8 @@ function buildPanel(node) {
         loraFolder: "__all",
         loraSort: "path",
         loraSortDescending: false,
+        loraPage: 0,
+        loraPageSize: 0,
         selectedLoras: new Set(),
         loraTreeOpen: new Set(["__all", "group:smart", "group:sd", "group:status", "group:folders"]),
     };
@@ -4227,6 +4252,17 @@ function buildPanel(node) {
     const networkSearch = el("input", { class: "webui-bridge-search", placeholder: "Search LoRA / LyCORIS" });
     const networkCount = el("span", { class: "webui-bridge-network-count" }, "0");
     const selectedLoraCount = el("span", { class: "webui-bridge-network-count" }, "选中 0");
+    const loraPageSizeSelect = el("select", { class: "webui-bridge-page-size", title: "每页最多显示多少张 LoRA 卡片" }, [
+        el("option", { value: "32" }, "32/页"),
+        el("option", { value: "48" }, "48/页"),
+        el("option", { value: "72" }, "72/页"),
+        el("option", { value: "96" }, "96/页"),
+        el("option", { value: "0" }, "全部"),
+    ]);
+    loraPageSizeSelect.value = String(state.loraPageSize);
+    const loraPagePrev = el("button", { class: "webui-bridge-network-tool", type: "button", title: "上一页" }, "‹");
+    const loraPageInfo = el("span", { class: "webui-bridge-network-count webui-bridge-page-info" }, "1/1");
+    const loraPageNext = el("button", { class: "webui-bridge-network-tool", type: "button", title: "下一页" }, "›");
     const networkTree = el("div", { class: "webui-bridge-network-tree" });
     const networkPane = el("div", { class: "webui-bridge-network-pane" });
     const cards = el("div", { class: "webui-bridge-card-grid" });
@@ -4510,50 +4546,67 @@ function buildPanel(node) {
             promptsColumn?.classList?.toggle("negative-collapsed", collapsed);
             applyTopRowCollapsedState(topRow, collapsed);
         };
+        const setPanelHeights = ({ top, lora, positiveText, positiveTags } = {}) => {
+            requestAnimationFrame(() => {
+                if (top === null) {
+                    resetResizeTargetHeight(topRow, topRowHeightKey);
+                } else if (top !== undefined) {
+                    setResizeTargetHeight(topRow, topRowHeightKey, top, { min: 64, max: topRow.__webuiBridgeMaxHeight });
+                }
+                if (lora === null) {
+                    resetResizeTargetHeight(extraSection, extraHeightKey, "1 1 auto");
+                    extraSection.style.flex = "1 1 auto";
+                } else if (lora !== undefined && !extraCollapsed) {
+                    setResizeTargetHeight(extraSection, extraHeightKey, lora, { min: EXTRA_NETWORKS_MIN_HEIGHT, max: extraSection.__webuiBridgeMaxHeight });
+                    extraSection.style.flex = "1 1 auto";
+                }
+                if (positiveText === null) {
+                    resetResizeTargetHeight(positive.textarea, positive.textarea.__webuiBridgeHeightKey);
+                } else if (positiveText !== undefined) {
+                    setResizeTargetHeight(positive.textarea, positive.textarea.__webuiBridgeHeightKey, positiveText, { min: 48, max: positive.textarea.__webuiBridgeMaxHeight });
+                }
+                if (positiveTags === null) {
+                    resetResizeTargetHeight(positiveTagPanel, positiveTagPanel.__webuiBridgeHeightKey);
+                } else if (positiveTags !== undefined) {
+                    setResizeTargetHeight(positiveTagPanel, positiveTagPanel.__webuiBridgeHeightKey, positiveTags, { min: positiveTagPanel.__webuiBridgeMinHeight, max: positiveTagPanel.__webuiBridgeMaxHeight });
+                }
+            });
+        };
         if (preset === "compact") {
-            setNodeSize(900, 700);
+            setNodeSize(920, 760);
             collapseNegative(false);
             extraCollapsed = false;
             writeLocalBoolean(extraCollapsedKey, false);
             applyExtraCollapsedState?.();
+            setPanelHeights({ top: 430, lora: 120, positiveText: 88, positiveTags: 180 });
         } else if (preset === "roomy") {
-            setNodeSize(1320, 1180);
+            setNodeSize(1380, 1280);
             collapseNegative(false);
             extraCollapsed = false;
             writeLocalBoolean(extraCollapsedKey, false);
             applyExtraCollapsedState?.();
-            requestAnimationFrame(() => {
-                setResizeTargetHeight(positive.textarea, positive.textarea.__webuiBridgeHeightKey, 120, { min: 48, max: 520 });
-                setResizeTargetHeight(positiveTagPanel, positiveTagPanel.__webuiBridgeHeightKey, 280, { min: positiveTagPanel.__webuiBridgeMinHeight, max: positiveTagPanel.__webuiBridgeMaxHeight });
-                setResizeTargetHeight(extraSection, extraHeightKey, 300, { min: EXTRA_NETWORKS_MIN_HEIGHT, max: extraSection.__webuiBridgeMaxHeight });
-            });
+            setPanelHeights({ top: 620, lora: 420, positiveText: 120, positiveTags: 280 });
         } else if (preset === "positive_focus") {
-            setNodeSize(1180, 980);
+            setNodeSize(1180, 1040);
             collapseNegative(true);
             extraCollapsed = false;
             writeLocalBoolean(extraCollapsedKey, false);
             applyExtraCollapsedState?.();
-            requestAnimationFrame(() => {
-                setResizeTargetHeight(positive.textarea, positive.textarea.__webuiBridgeHeightKey, 170, { min: 48, max: 520 });
-                setResizeTargetHeight(positiveTagPanel, positiveTagPanel.__webuiBridgeHeightKey, 360, { min: positiveTagPanel.__webuiBridgeMinHeight, max: positiveTagPanel.__webuiBridgeMaxHeight });
-                setResizeTargetHeight(extraSection, extraHeightKey, 220, { min: EXTRA_NETWORKS_MIN_HEIGHT, max: extraSection.__webuiBridgeMaxHeight });
-            });
+            setPanelHeights({ top: 560, lora: 180, positiveText: 170, positiveTags: 340 });
         } else if (preset === "minimal_lora") {
-            setNodeSize(940, 700);
+            setNodeSize(940, 680);
             collapseNegative(true);
-            extraCollapsed = true;
-            writeLocalBoolean(extraCollapsedKey, true);
+            extraCollapsed = false;
+            writeLocalBoolean(extraCollapsedKey, false);
             applyExtraCollapsedState?.();
-            requestAnimationFrame(() => {
-                setResizeTargetHeight(positive.textarea, positive.textarea.__webuiBridgeHeightKey, 150, { min: 48, max: 520 });
-                setResizeTargetHeight(positiveTagPanel, positiveTagPanel.__webuiBridgeHeightKey, 260, { min: positiveTagPanel.__webuiBridgeMinHeight, max: positiveTagPanel.__webuiBridgeMaxHeight });
-            });
+            setPanelHeights({ top: 500, lora: 72, positiveText: 150, positiveTags: 260 });
         } else {
             setNodeSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT);
             collapseNegative(false);
             extraCollapsed = false;
             writeLocalBoolean(extraCollapsedKey, false);
             applyExtraCollapsedState?.();
+            setPanelHeights({ top: null, lora: null, positiveText: null, positiveTags: null });
         }
     };
 
@@ -5380,6 +5433,7 @@ function buildPanel(node) {
                         else state.loraTreeOpen.add(node.path);
                     } else {
                         state.loraFolder = node.path;
+                        state.loraPage = 0;
                     }
                     renderTree();
                     renderCards();
@@ -5432,6 +5486,20 @@ function buildPanel(node) {
         renderCards();
         setStatus("已清空 LoRA 选择");
     };
+    loraPageSizeSelect.addEventListener("change", (event) => {
+        const value = Number(event.currentTarget.value);
+        state.loraPageSize = Number.isFinite(value) ? value : 32;
+        state.loraPage = 0;
+        renderCards();
+    });
+    loraPagePrev.addEventListener("click", () => {
+        state.loraPage = Math.max(0, state.loraPage - 1);
+        renderCards();
+    });
+    loraPageNext.addEventListener("click", () => {
+        state.loraPage += 1;
+        renderCards();
+    });
 
     const renderCards = () => {
         const q = networkSearch.value.trim().toLowerCase();
@@ -5442,9 +5510,17 @@ function buildPanel(node) {
             loraMatchesFilter(item, filter) &&
             loraMatchesQuery(item, q)
         )), state.loraSort, state.loraSortDescending);
-        const visible = filtered.slice(0, 160);
+        const pageSize = Number(state.loraPageSize) || 0;
+        const showAll = pageSize <= 0;
+        const totalPages = showAll ? 1 : Math.max(1, Math.ceil(filtered.length / pageSize));
+        state.loraPage = showAll ? 0 : Math.min(Math.max(0, Number(state.loraPage) || 0), totalPages - 1);
+        const start = state.loraPage * Math.max(1, pageSize);
+        const visible = showAll ? filtered : filtered.slice(start, start + pageSize);
         cards.innerHTML = "";
-        networkCount.textContent = `${filtered.length}${filtered.length > visible.length ? ` / showing ${visible.length}` : ""}`;
+        networkCount.textContent = `${filtered.length} 个 LoRA`;
+        loraPageInfo.textContent = showAll ? "全部" : `${state.loraPage + 1}/${totalPages}`;
+        loraPagePrev.disabled = showAll || state.loraPage <= 0;
+        loraPageNext.disabled = showAll || state.loraPage >= totalPages - 1;
         updateSelectedLoraCount();
         if (!visible.length) {
             cards.append(el("div", { class: "webui-bridge-empty" }, "No LoRA matched"));
@@ -5845,6 +5921,7 @@ function buildPanel(node) {
         title,
         onclick: (event) => {
             state.loraSort = key;
+            state.loraPage = 0;
             for (const button of event.currentTarget.parentElement.querySelectorAll(".webui-bridge-network-tool[data-sort]")) {
                 button.classList.toggle("active", button.dataset.sort === key);
             }
@@ -5865,6 +5942,10 @@ function buildPanel(node) {
             onclick: clearSelectedLoras,
         }, "清空选择"),
         selectedLoraCount,
+        loraPageSizeSelect,
+        loraPagePrev,
+        loraPageInfo,
+        loraPageNext,
         el("span", { class: "webui-bridge-network-sort-label" }, "Sort"),
         makeNetworkSortButton("path", "Path", "Sort by folder path"),
         makeNetworkSortButton("name", "Name", "Sort by LoRA name"),
@@ -5874,6 +5955,7 @@ function buildPanel(node) {
             title: "Reverse sort direction",
             onclick: (event) => {
                 state.loraSortDescending = !state.loraSortDescending;
+                state.loraPage = 0;
                 event.currentTarget.classList.toggle("active", state.loraSortDescending);
                 renderCards();
             },
@@ -5932,10 +6014,12 @@ function buildPanel(node) {
         ),
         negativeTagPanel,
     ]);
+    positive.row.classList.add("webui-bridge-positive-prompt-row");
     promptsColumn.classList.toggle("negative-collapsed", negative.row.classList.contains("collapsed"));
     const topRowHeightKey = "webui-bridge-toprow-height";
     const extraHeightKey = "webui-bridge-extra-height";
     const extraCollapsedKey = "webui-bridge-extra-collapsed";
+    migrateLayoutStorage([topRowHeightKey, extraHeightKey]);
     let extraCollapsed = readLocalBoolean(extraCollapsedKey, false);
     let loraOverlayOpen = false;
     const extraBody = el("div", { class: "webui-bridge-extra-body" }, [
@@ -5950,6 +6034,7 @@ function buildPanel(node) {
                 min: EXTRA_NETWORKS_MIN_HEIGHT,
                 max: extraSection.__webuiBridgeMaxHeight || EXTRA_NETWORKS_MAX_HEIGHT,
             });
+            extraSection.style.flex = "1 1 auto";
         }
     };
     const extraToggle = el("button", {
@@ -6010,8 +6095,9 @@ function buildPanel(node) {
         extraSection.style.height = "";
         extraSection.style.minHeight = "";
         extraSection.style.maxHeight = "";
-        extraSection.style.flex = "0 0 auto";
+        extraSection.style.flex = "1 1 auto";
         applyStoredHeight(extraSection, extraHeightKey, { min: EXTRA_NETWORKS_MIN_HEIGHT, max: extraSection.__webuiBridgeMaxHeight });
+        extraSection.style.flex = "1 1 auto";
         requestAnimationFrame(ensureUsableExtraHeight);
     }
     applyExtraCollapsedState();
@@ -6065,21 +6151,20 @@ function buildPanel(node) {
         ]),
     ]);
     topRow.__webuiBridgeHeightKey = topRowHeightKey;
-    topRow.__webuiBridgeMinHeight = 300;
-    topRow.__webuiBridgeMaxHeight = 980;
-    applyStoredHeight(topRow, topRowHeightKey, { min: 300, max: 980 });
+    topRow.__webuiBridgeMinHeight = 220;
+    topRow.__webuiBridgeMaxHeight = 100000;
+    applyStoredHeight(topRow, topRowHeightKey, { min: topRow.__webuiBridgeMinHeight, max: topRow.__webuiBridgeMaxHeight });
     applyTopRowCollapsedState(topRow, negative.row.classList.contains("collapsed"));
 
     const panel = el("div", { class: "webui-bridge-panel" }, [
         topRow,
         createHeightSplitGrip(topRow, extraSection, () => topRow.classList.contains("negative-collapsed") ? "" : topRowHeightKey, extraHeightKey, {
             className: "webui-bridge-panel-splitter",
-            beforeMin: () => topRow.classList.contains("negative-collapsed") ? 64 : 300,
-            beforeMax: 980,
-            afterMin: 120,
+            beforeMin: () => topRow.classList.contains("negative-collapsed") ? 64 : topRow.__webuiBridgeMinHeight,
+            beforeMax: topRow.__webuiBridgeMaxHeight,
+            afterMin: EXTRA_NETWORKS_MIN_HEIGHT,
             afterMax: EXTRA_NETWORKS_MAX_HEIGHT,
-            fillAfter: true,
-            afterResetFlex: "0 0 auto",
+            afterFlex: "1 1 auto",
             title: "上下拖动分配提示词区域和 Extra Networks 高度，双击恢复",
         }),
         extraSection,
@@ -6121,6 +6206,7 @@ function buildPanel(node) {
     }
     networkSearch.addEventListener("input", () => {
         ensureUsableExtraHeight();
+        state.loraPage = 0;
         renderCards();
     });
     modelSelect.addEventListener("change", applySelectedModel);
@@ -6234,7 +6320,7 @@ function installWebUIPanel(node) {
     const domWidget = node.addDOMWidget("webui_prompt_frontend", "webui_prompt_frontend", panel, {
         serialize: false,
         hideOnZoom: false,
-        getMinHeight: () => 420,
+        getMinHeight: () => 280,
         getMaxHeight: () => 100000,
     });
     installWidgetSerializationFallback(domWidget, () => null);
@@ -6250,9 +6336,11 @@ function installWebUIPanel(node) {
     domWidget.y = 0;
     domWidget.last_y = 0;
     const applyDomWidgetSize = (nodeWidth, nodeHeight) => {
-        const widgetWidth = Math.max(720, nodeWidth - 20);
-        const widgetTop = Number.isFinite(domWidget.y) && domWidget.y > 0 ? domWidget.y : 92;
-        const widgetHeight = Math.max(420, nodeHeight - widgetTop - DOM_WIDGET_LAYOUT_PAD);
+        domWidget.y = 0;
+        domWidget.last_y = 0;
+        const widgetWidth = Math.max(PANEL_MIN_WIDTH, nodeWidth - 20);
+        const widgetTop = 0;
+        const widgetHeight = Math.max(280, nodeHeight - widgetTop - DOM_WIDGET_LAYOUT_PAD);
         panel.style.width = `${widgetWidth}px`;
         panel.style.height = `${widgetHeight}px`;
         return [widgetWidth, widgetHeight];
@@ -6273,8 +6361,8 @@ function installWebUIPanel(node) {
     } else if (looksLikeLegacyDefaultSize(node.size)) {
         node.__webuiBridgeDesiredSize = clampPanelSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT);
         node.setSize(node.__webuiBridgeDesiredSize);
-    } else if (!node.size || node.size[0] < 840 || node.size[1] < 620) {
-        node.__webuiBridgeDesiredSize = clampPanelSize(Math.max(node.size?.[0] || DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_WIDTH), Math.max(node.size?.[1] || DEFAULT_PANEL_HEIGHT, DEFAULT_PANEL_HEIGHT));
+    } else if (!node.size || node.size[0] < PANEL_MIN_WIDTH || node.size[1] < PANEL_MIN_HEIGHT) {
+        node.__webuiBridgeDesiredSize = clampPanelSize(node.size?.[0] || DEFAULT_PANEL_WIDTH, node.size?.[1] || DEFAULT_PANEL_HEIGHT);
         node.setSize(node.__webuiBridgeDesiredSize);
     } else if (node.size[0] > PANEL_MAX_WIDTH) {
         node.setSize(clampPanelSize(node.size[0], node.size[1]));
@@ -6291,12 +6379,13 @@ function addStyles() {
             width: 100%;
             min-width: 0;
             height: 100%;
-            min-height: 620px;
-            padding: 8px;
+            min-height: ${PANEL_MIN_HEIGHT}px;
+            padding: 6px 6px 2px;
             box-sizing: border-box;
             display: flex;
+            flex: 0 0 auto !important;
             flex-direction: column;
-            gap: 8px;
+            gap: 6px;
             background: #20242d;
             color: #f2f4f8;
             font-family: Arial, sans-serif;
@@ -6370,8 +6459,13 @@ function addStyles() {
             z-index: 2;
         }
         .webui-bridge-panel-splitter {
-            flex: 0 0 8px;
-            margin: -2px 0;
+            flex: 0 0 12px;
+            min-height: 12px;
+            margin: -4px 0 -4px;
+            border-top: 2px solid rgba(112, 143, 190, .8);
+            border-bottom: 2px solid rgba(30, 38, 52, .95);
+            border-radius: 4px;
+            z-index: 8;
         }
         .webui-bridge-size-controls {
             display: grid;
@@ -6536,7 +6630,7 @@ function addStyles() {
             display: grid;
             grid-template-columns: minmax(0, 1fr) clamp(220px, 24%, 280px);
             gap: 8px;
-            flex: 0 1 54%;
+            flex: 0 1 auto;
             min-height: 0;
             max-height: none;
             overflow: hidden;
@@ -6552,6 +6646,8 @@ function addStyles() {
             gap: 6px;
             min-width: 0;
             min-height: 0;
+            align-content: flex-start;
+            justify-content: flex-start;
             overflow: hidden auto;
         }
         .webui-bridge-prompts.negative-collapsed {
@@ -6586,6 +6682,12 @@ function addStyles() {
         }
         .webui-bridge-prompt-row.active {
             border-color: #6aa3ff;
+        }
+        .webui-bridge-positive-prompt-row {
+            position: sticky;
+            top: 0;
+            z-index: 15;
+            box-shadow: 0 6px 12px rgba(0, 0, 0, .22);
         }
         .webui-bridge-prompt-row.prompt-placement-error {
             border-color: #d84a4a;
@@ -7380,18 +7482,19 @@ function addStyles() {
             filter: brightness(1.08);
         }
         .webui-bridge-extra {
-            min-height: 180px;
-            flex: 0 0 auto;
+            min-height: ${EXTRA_NETWORKS_MIN_HEIGHT}px;
+            flex: 1 1 auto;
             max-height: none;
             display: flex;
             flex-direction: column;
-            border: 1px solid #3e4654;
-            border-radius: 6px;
+            border: 2px solid #46556c;
+            border-radius: 4px;
             overflow: hidden;
             background: #171a20;
+            box-shadow: inset 0 0 0 1px rgba(10, 16, 24, .65);
         }
         .webui-bridge-extra-compact {
-            min-height: 180px;
+            min-height: ${EXTRA_NETWORKS_MIN_HEIGHT}px;
         }
         .webui-bridge-extra-head {
             display: grid;
@@ -7405,8 +7508,8 @@ function addStyles() {
             color: #cbd4e1;
         }
         .webui-bridge-network-controls {
-            display: grid;
-            grid-template-columns: minmax(180px, 1fr) auto repeat(4, minmax(34px, auto)) auto;
+            display: flex;
+            flex-wrap: wrap;
             align-items: center;
             gap: 5px;
             min-width: 0;
@@ -7418,6 +7521,7 @@ function addStyles() {
             border-radius: 5px;
             background: #111318;
             color: #f2f4f8;
+            flex: 1 1 180px;
         }
         .webui-bridge-network-count {
             color: #8fa0b7;
@@ -7439,6 +7543,23 @@ function addStyles() {
             cursor: pointer;
             font-size: 11px;
         }
+        .webui-bridge-network-tool:disabled {
+            opacity: .45;
+            cursor: default;
+        }
+        .webui-bridge-page-size {
+            height: 28px;
+            min-width: 74px;
+            border: 1px solid #4d5666;
+            border-radius: 5px;
+            background: #202733;
+            color: #e5edf9;
+            font-size: 11px;
+        }
+        .webui-bridge-page-info {
+            min-width: 42px;
+            text-align: center;
+        }
         .webui-bridge-network-tool.webui-bridge-network-primary {
             min-width: 104px;
             border-color: #4d8f66;
@@ -7458,7 +7579,7 @@ function addStyles() {
         .webui-bridge-extra-body {
             display: grid;
             grid-template-columns: minmax(170px, 230px) minmax(0, 1fr);
-            height: clamp(180px, 24vh, 360px);
+            height: auto;
             min-height: 0;
             flex: 1 1 auto;
             overflow: hidden;
@@ -7576,6 +7697,7 @@ function addStyles() {
             padding: 8px;
             overflow: auto;
             min-height: 0;
+            height: 100%;
             flex: 1 1 auto;
             scrollbar-width: thin;
         }
