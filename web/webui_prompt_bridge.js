@@ -21,6 +21,7 @@ const PANEL_MIN_HEIGHT = 620;
 const DOM_WIDGET_LAYOUT_PAD = 58;
 const PROMPT_CHIPS_MIN_HEIGHT = 104;
 const EXTRA_NETWORKS_MIN_HEIGHT = 180;
+const EXTRA_NETWORKS_MAX_HEIGHT = 420;
 const AIO_POSITIVE_MIN_HEIGHT = 180;
 const AIO_NEGATIVE_MIN_HEIGHT = 220;
 const DEFAULT_BRIDGE_SETTINGS = {
@@ -39,6 +40,17 @@ const SETTING_CHOICES = {
     layout_preset: ["default", "compact", "roomy", "positive_focus", "minimal_lora"],
     tag_display: ["local_first", "prompt_first", "compact"],
     lora_card_size: ["compact", "normal", "large"],
+};
+const WEBUI_CHECK_LABELS = {
+    styles_file: "样式",
+    prompt_all_in_one_dir: "Prompt All in One",
+    tagcomplete_dir: "TagComplete",
+    webui_python_site_packages: "Python依赖",
+    loras: "LoRA",
+    checkpoints: "模型",
+    vae: "VAE",
+    embeddings: "Embeddings",
+    controlnet: "ControlNet",
 };
 const SPLIT_ANIMA_MODEL_VALUE = "__webui_bridge_split_anima_qwen__";
 const SPLIT_ANIMA_MODEL_LABEL = "分体 Anima/Qwen（Anima UNET + Text Encoder + VAE）";
@@ -394,7 +406,7 @@ function createHeightSplitGrip(beforeTarget, afterTarget, beforeKey, afterKey, o
                 const nextBefore = clampNumber(rawBefore, minBefore, Math.max(minBefore, maxBefore));
                 setResizeTargetHeight(before, beforeKey, nextBefore, { min: minBefore, max: maxBefore });
                 if (options.fillAfter) {
-                    resetResizeTargetHeight(after, afterKey, "1 1 0");
+                    resetResizeTargetHeight(after, afterKey, options.afterResetFlex || "1 1 0");
                 } else {
                     const nextAfter = total - nextBefore;
                     setResizeTargetHeight(after, afterKey, nextAfter, { min: afterMin, max: afterMax });
@@ -940,10 +952,17 @@ function loraSdVersionLabel(item) {
 
 function loraMetadataStatusLabel(item) {
     if (loraManualCategory(item)) return "已手动分类";
-    if (item.thumbnail) return "有预览图";
+    if (item.thumbnail && !item.thumbnail_unknown) return "有预览图";
     if (item.activation_text) return "有触发词";
     if (item.description || item.notes) return "有说明";
     return "待整理";
+}
+
+function loraPreviewFallback() {
+    return el("span", { class: "webui-bridge-card-preview webui-bridge-card-preview-empty" }, [
+        el("span", {}, "NO"),
+        el("span", {}, "PREVIEW"),
+    ]);
 }
 
 function makeTreeNode(name, path, icon = "Dir") {
@@ -1574,17 +1593,35 @@ function applyStyleText(base, styleText) {
     return base.trim() ? `${base}${EXTRA_SEPARATOR}${styleText}` : styleText;
 }
 
-async function loadBridgeData() {
+function fetchJsonWithTimeout(url, options = {}, timeoutMs = 0) {
+    if (!timeoutMs) {
+        return api.fetchApi(url, options).then((r) => r.json());
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    return api.fetchApi(url, { ...options, signal: controller.signal })
+        .then((r) => r.json())
+        .finally(() => clearTimeout(timer));
+}
+
+async function loadBridgeData(options = {}) {
+    const loraDetail = options.loraDetail === "full" ? "full" : "basic";
+    const loraUrl = loraDetail === "full" ? "/webui_prompt_bridge/loras" : "/webui_prompt_bridge/loras?detail=basic";
+    const loraTimeoutMs = options.loraTimeoutMs ?? (loraDetail === "basic" ? 8000 : 0);
+    const fallbackLoras = Array.isArray(options.fallbackLoras) ? options.fallbackLoras : [];
     const [lorasRes, stylesRes, promptAllInOneRes, modelsRes, webuiRes, settingsRes] = await Promise.allSettled([
-        api.fetchApi("/webui_prompt_bridge/loras", { cache: "no-store" }).then((r) => r.json()),
+        fetchJsonWithTimeout(loraUrl, { cache: "no-store" }, loraTimeoutMs),
         api.fetchApi("/webui_prompt_bridge/styles", { cache: "no-store" }).then((r) => r.json()),
         api.fetchApi("/webui_prompt_bridge/prompt_all_in_one?lang=zh_CN", { cache: "no-store" }).then((r) => r.json()),
         api.fetchApi("/webui_prompt_bridge/models", { cache: "no-store" }).then((r) => r.json()),
         api.fetchApi("/webui_prompt_bridge/webui_integration", { cache: "no-store" }).then((r) => r.json()),
         api.fetchApi("/webui_prompt_bridge/settings", { cache: "no-store" }).then((r) => r.json()),
     ]);
+    const lorasLoaded = lorasRes.status === "fulfilled";
     return {
-        loras: lorasRes.status === "fulfilled" ? lorasRes.value.loras || [] : [],
+        loras: lorasLoaded ? lorasRes.value.loras || [] : fallbackLoras,
+        lorasLoaded,
+        loraDetail,
         styles: stylesRes.status === "fulfilled" ? stylesRes.value.styles || [] : [],
         promptAllInOne: promptAllInOneRes.status === "fulfilled" ? promptAllInOneRes.value : { group_tags: [], favorites: {} },
         models: modelsRes.status === "fulfilled" ? modelsRes.value : { checkpoints: [], unets: [], clips: [], vaes: [], embeddings: [] },
@@ -4324,8 +4361,8 @@ function buildPanel(node) {
         positive.textarea.focus();
     };
 
-    const refreshBridgeData = async () => {
-        const data = await loadBridgeData();
+    const refreshBridgeData = async (options = {}) => {
+        const data = await loadBridgeData({ fallbackLoras: state.loras, ...options });
         state.loras = data.loras;
         state.styles = data.styles;
         state.models = data.models;
@@ -4347,7 +4384,11 @@ function buildPanel(node) {
         const checks = info?.checks || {};
         const ok = Object.values(checks).filter((item) => item?.exists).length;
         const total = Object.keys(checks).length;
-        return info?.webui_root ? `WebUI: ${info.webui_root} (${ok}/${total})` : "WebUI: 未接入";
+        const missing = Object.entries(checks)
+            .filter(([, item]) => !item?.exists)
+            .map(([key]) => WEBUI_CHECK_LABELS[key] || key);
+        const suffix = missing.length ? `，缺少 ${missing.slice(0, 2).join("、")}${missing.length > 2 ? "等" : ""}` : "";
+        return info?.webui_root ? `WebUI: ${info.webui_root} (${ok}/${total}${suffix})` : "WebUI: 未接入";
     };
 
     const showWebUIIntegrationDialog = async () => {
@@ -4393,9 +4434,11 @@ function buildPanel(node) {
                 }
                 const info = await connectWebUIRoot(root, autoDetect);
                 renderInfo(info);
-                await refreshBridgeData();
+                const data = await refreshBridgeData({ loraDetail: "basic", loraTimeoutMs: 8000 });
                 setStatus(`已接入 WebUI：${info.webui_root}`, { kind: "success" });
-                statusLine.textContent = `${webuiStatusText(info)}；已刷新提示词、样式、LoRA 和模型列表`;
+                statusLine.textContent = data.lorasLoaded
+                    ? `${webuiStatusText(info)}；已刷新提示词、样式、LoRA 和模型列表`
+                    : `${webuiStatusText(info)}；已刷新提示词、样式和模型列表，LoRA 扫描较慢，已保留原列表`;
             } catch (error) {
                 statusLine.textContent = `接入失败: ${error?.message || error}`;
             }
@@ -5467,11 +5510,14 @@ function buildPanel(node) {
                     el("span", {}, ""),
                 ]),
                 item.thumbnail
-                    ? el("img", { class: "webui-bridge-card-preview", src: item.thumbnail, alt: "", loading: "lazy" })
-                    : el("span", { class: "webui-bridge-card-preview webui-bridge-card-preview-empty" }, [
-                        el("span", {}, "NO"),
-                        el("span", {}, "PREVIEW"),
-                    ]),
+                    ? el("img", {
+                        class: "webui-bridge-card-preview",
+                        src: item.thumbnail,
+                        alt: "",
+                        loading: "lazy",
+                        onerror: (event) => event.currentTarget.replaceWith(loraPreviewFallback()),
+                    })
+                    : loraPreviewFallback(),
                 el("span", { class: "webui-bridge-card-buttons" }, [
                     el("button", {
                         type: "button",
@@ -5902,7 +5948,7 @@ function buildPanel(node) {
         if (height < EXTRA_NETWORKS_MIN_HEIGHT) {
             setResizeTargetHeight(extraSection, extraHeightKey, EXTRA_NETWORKS_MIN_HEIGHT, {
                 min: EXTRA_NETWORKS_MIN_HEIGHT,
-                max: extraSection.__webuiBridgeMaxHeight || 760,
+                max: extraSection.__webuiBridgeMaxHeight || EXTRA_NETWORKS_MAX_HEIGHT,
             });
         }
     };
@@ -5927,7 +5973,7 @@ function buildPanel(node) {
         extraToggle.textContent = "隐藏 LoRA";
         clearLocalValue(extraHeightKey);
         extraSection.style.height = "";
-        extraSection.style.flex = "1 1 0";
+        extraSection.style.flex = "";
     };
     const closeLoraOverlay = () => {
         loraOverlayOpen = false;
@@ -5949,7 +5995,7 @@ function buildPanel(node) {
     ]);
     extraSection.__webuiBridgeHeightKey = extraHeightKey;
     extraSection.__webuiBridgeMinHeight = EXTRA_NETWORKS_MIN_HEIGHT;
-    extraSection.__webuiBridgeMaxHeight = 760;
+    extraSection.__webuiBridgeMaxHeight = EXTRA_NETWORKS_MAX_HEIGHT;
     function applyExtraCollapsedState() {
         extraSection.classList.toggle("collapsed", extraCollapsed);
         extraBody.style.display = extraCollapsed ? "none" : "";
@@ -5964,7 +6010,7 @@ function buildPanel(node) {
         extraSection.style.height = "";
         extraSection.style.minHeight = "";
         extraSection.style.maxHeight = "";
-        extraSection.style.flex = "";
+        extraSection.style.flex = "0 0 auto";
         applyStoredHeight(extraSection, extraHeightKey, { min: EXTRA_NETWORKS_MIN_HEIGHT, max: extraSection.__webuiBridgeMaxHeight });
         requestAnimationFrame(ensureUsableExtraHeight);
     }
@@ -6031,8 +6077,9 @@ function buildPanel(node) {
             beforeMin: () => topRow.classList.contains("negative-collapsed") ? 64 : 300,
             beforeMax: 980,
             afterMin: 120,
-            afterMax: 760,
+            afterMax: EXTRA_NETWORKS_MAX_HEIGHT,
             fillAfter: true,
+            afterResetFlex: "0 0 auto",
             title: "上下拖动分配提示词区域和 Extra Networks 高度，双击恢复",
         }),
         extraSection,
@@ -7334,7 +7381,7 @@ function addStyles() {
         }
         .webui-bridge-extra {
             min-height: 180px;
-            flex: 1 1 46%;
+            flex: 0 0 auto;
             max-height: none;
             display: flex;
             flex-direction: column;
@@ -7411,8 +7458,10 @@ function addStyles() {
         .webui-bridge-extra-body {
             display: grid;
             grid-template-columns: minmax(170px, 230px) minmax(0, 1fr);
+            height: clamp(180px, 24vh, 360px);
             min-height: 0;
             flex: 1 1 auto;
+            overflow: hidden;
         }
         .webui-bridge-extra.collapsed {
             flex: 0 0 42px !important;
@@ -7429,8 +7478,13 @@ function addStyles() {
             bottom: 8px;
             min-height: 0 !important;
             height: auto !important;
+            flex: 1 1 auto !important;
             border-color: #6b9cff;
             box-shadow: 0 16px 54px rgba(0, 0, 0, .62);
+        }
+        .webui-bridge-panel.lora-overlay .webui-bridge-extra-body {
+            height: auto;
+            flex: 1 1 auto;
         }
         .webui-bridge-panel.lora-overlay .webui-bridge-panel-splitter {
             visibility: hidden;

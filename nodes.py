@@ -3296,6 +3296,8 @@ def _register_routes():
 
     @routes.get("/webui_prompt_bridge/loras")
     async def list_loras(request):
+        detail = str(request.query.get("detail", "full") or "full").casefold()
+        basic = detail in {"basic", "lite", "light"}
         try:
             loras = folder_paths.get_filename_list("loras")
         except Exception:
@@ -3311,20 +3313,23 @@ def _register_routes():
             detected_sd_version = ""
             created = 0
             modified = 0
-            try:
-                lora_path = folder_paths.get_full_path("loras", name)
-                if _find_lora_preview_path(lora_path):
-                    thumbnail = f"/webui_prompt_bridge/lora_thumbnail?name={quote(name, safe='')}"
-                description = _find_lora_description(lora_path)
-                user_metadata = _read_lora_user_metadata(lora_path, description)
-                raw_metadata = _read_lora_raw_metadata(lora_path)
-                detected_sd_version = _detect_lora_sd_version(raw_metadata, _lora_metadata_summary(name))
-                stat = Path(lora_path).stat() if lora_path else None
-                if stat:
-                    created = int(getattr(stat, "st_ctime", 0))
-                    modified = int(getattr(stat, "st_mtime", 0))
-            except Exception:
-                thumbnail = None
+            if basic:
+                thumbnail = f"/webui_prompt_bridge/lora_thumbnail?name={quote(name, safe='')}"
+            else:
+                try:
+                    lora_path = folder_paths.get_full_path("loras", name)
+                    if _find_lora_preview_path(lora_path):
+                        thumbnail = f"/webui_prompt_bridge/lora_thumbnail?name={quote(name, safe='')}"
+                    description = _find_lora_description(lora_path)
+                    user_metadata = _read_lora_user_metadata(lora_path, description)
+                    raw_metadata = _read_lora_raw_metadata(lora_path)
+                    detected_sd_version = _detect_lora_sd_version(raw_metadata, _lora_metadata_summary(name))
+                    stat = Path(lora_path).stat() if lora_path else None
+                    if stat:
+                        created = int(getattr(stat, "st_ctime", 0))
+                        modified = int(getattr(stat, "st_mtime", 0))
+                except Exception:
+                    thumbnail = None
             display_description = user_metadata.get("description") or description
             metadata_aliases = [
                 value for value in (
@@ -3345,6 +3350,7 @@ def _register_routes():
                 "base_name": base_name,
                 "aliases": metadata_aliases,
                 "thumbnail": thumbnail,
+                "thumbnail_unknown": basic,
                 "description": display_description,
                 "user_metadata": user_metadata,
                 "manual_category": user_metadata.get("category", "") or user_metadata.get("manual category", ""),
