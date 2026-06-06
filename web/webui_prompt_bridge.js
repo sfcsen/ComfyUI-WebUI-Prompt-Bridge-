@@ -18,7 +18,7 @@ const LEGACY_PANEL_HEIGHT = 1120;
 const PANEL_MIN_WIDTH = 420;
 const PANEL_MAX_WIDTH = 100000;
 const PANEL_MIN_HEIGHT = 360;
-const DOM_WIDGET_LAYOUT_PAD = 58;
+const DOM_WIDGET_LAYOUT_PAD = 128;
 const PROMPT_CHIPS_MIN_HEIGHT = 104;
 const EXTRA_NETWORKS_MIN_HEIGHT = 72;
 const EXTRA_NETWORKS_MAX_HEIGHT = 100000;
@@ -6231,7 +6231,7 @@ function buildPanel(node) {
         updateLayoutPresetControls();
         positiveTagPanel.__webuiBridgeRender?.();
         negativeTagPanel.__webuiBridgeRender?.();
-        if (state.settings?.layout_preset && state.settings.layout_preset !== "default") {
+        if (!node.__webuiBridgeFreshNode && state.settings?.layout_preset && state.settings.layout_preset !== "default") {
             requestAnimationFrame(() => applyLayoutPreset(state.settings.layout_preset));
         }
         maybeShowStartupWizard();
@@ -6335,12 +6335,11 @@ function installWebUIPanel(node) {
     ensureGraphLinksSerializableCompatibility();
     domWidget.y = 0;
     domWidget.last_y = 0;
-    const applyDomWidgetSize = (nodeWidth, nodeHeight) => {
+    const applyDomWidgetSize = (nodeWidth, nodeHeight, widgetTop = 0) => {
         domWidget.y = 0;
         domWidget.last_y = 0;
         const widgetWidth = Math.max(PANEL_MIN_WIDTH, nodeWidth - 20);
-        const widgetTop = 0;
-        const widgetHeight = Math.max(280, nodeHeight - widgetTop - DOM_WIDGET_LAYOUT_PAD);
+        const widgetHeight = Math.max(280, nodeHeight - Math.max(0, widgetTop) - DOM_WIDGET_LAYOUT_PAD);
         panel.style.width = `${widgetWidth}px`;
         panel.style.height = `${widgetHeight}px`;
         return [widgetWidth, widgetHeight];
@@ -6349,7 +6348,8 @@ function installWebUIPanel(node) {
         const desired = node.__webuiBridgeDesiredSize || node.size || [width || 1040, 820];
         const nodeWidth = desired[0] || width || 1040;
         const nodeHeight = desired[1] || 820;
-        return applyDomWidgetSize(nodeWidth, nodeHeight);
+        const widgetTop = Number.isFinite(domWidget.y) && domWidget.y > 0 ? domWidget.y : 0;
+        return applyDomWidgetSize(nodeWidth, nodeHeight, widgetTop);
     };
     applyDomWidgetSize(node.__webuiBridgeDesiredSize[0], node.__webuiBridgeDesiredSize[1]);
     node.__webuiBridgePanel = panel;
@@ -6358,6 +6358,16 @@ function installWebUIPanel(node) {
         node.__webuiBridgeDesiredSize = clampPanelSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT);
         node.__webuiBridgeFreshSizeApplied = true;
         node.setSize(node.__webuiBridgeDesiredSize);
+        const enforceFreshSize = () => {
+            const desired = node.__webuiBridgeDesiredSize;
+            if (!node.__webuiBridgeFreshNode || node.__webuiBridgeWasConfigured || !Array.isArray(desired)) return;
+            if ((node.size?.[1] || 0) > desired[1] + 8 || (node.size?.[0] || 0) !== desired[0]) {
+                node.setSize(desired);
+                app.graph?.setDirtyCanvas?.(true, true);
+            }
+        };
+        window.setTimeout(enforceFreshSize, 0);
+        window.setTimeout(enforceFreshSize, 250);
     } else if (looksLikeLegacyDefaultSize(node.size)) {
         node.__webuiBridgeDesiredSize = clampPanelSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT);
         node.setSize(node.__webuiBridgeDesiredSize);
