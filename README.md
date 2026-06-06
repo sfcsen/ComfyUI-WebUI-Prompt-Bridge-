@@ -13,7 +13,7 @@
 
 这个节点就是把两边的优点合到一起：**ComfyUI 负责工作流，WebUI Prompt Bridge 负责提示词操作**。
 
-新用户可以先从中文最小工作流教程开始：`docs/tutorial-minimal-workflows.md`。教程分别演示 Anima 分体模型和 XL 整合 checkpoint 的最小接线，并配有截图和可直接拖入 ComfyUI 的 JSON 工作流。
+新用户可以先从中文最小工作流教程开始：`docs/tutorial-minimal-workflows.md`。教程分别演示 Anima 分体模型、XL 整合 checkpoint 和 XL 图生图的最小接线，并配有截图和可直接拖入 ComfyUI 的 JSON 工作流。
 
 ## v0.2.6 更新说明
 
@@ -74,10 +74,11 @@ workflows/anima-webui-prompt-bridge.json
 docs/tutorial-minimal-workflows.md
 ```
 
-教程里提供了两个最小工作流：
+教程里提供了三个最小工作流：
 
 - `workflows/tutorial-minimal-anima-webui-prompt-bridge.json`：Anima 分体模型示例。
 - `workflows/tutorial-minimal-xl-webui-prompt-bridge.json`：XL 整合 checkpoint 示例。
+- `workflows/xl-img2img-webui-prompt-bridge.json`：最小图生图示例，使用 `LoadImage -> VAEEncode -> KSampler`，默认 `denoise = 0.45`，适合在保留原图构图的同时按 Prompt Bridge 提示词重绘。
 
 ### 工作流包含什么
 

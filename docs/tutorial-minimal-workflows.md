@@ -1,6 +1,6 @@
 # WebUI Prompt Bridge 最小工作流教程
 
-这份教程用于快速演示 `WebUI Prompt Bridge` 节点的最小用法。仓库提供两份最小工作流：一份使用 Anima 分体模型，一份使用 XL 整合 checkpoint。它们都只保留最核心的生成链路，适合新用户学习节点如何接线。
+这份教程用于快速演示 `WebUI Prompt Bridge` 节点的最小用法。仓库提供三份最小工作流：一份使用 Anima 分体模型，一份使用 XL 整合 checkpoint，一份使用 XL checkpoint 做图生图重绘。它们都只保留最核心的生成链路，适合新用户学习节点如何接线。
 
 ## 工作流文件
 
@@ -8,6 +8,7 @@
 | --- | --- | --- |
 | Anima 分体模型 | `workflows/tutorial-minimal-anima-webui-prompt-bridge.json` | `UNET + CLIP + VAE` 分体加载 |
 | XL 整合模型 | `workflows/tutorial-minimal-xl-webui-prompt-bridge.json` | `CheckpointLoaderSimple` 整合模型加载 |
+| XL 图生图 | `workflows/xl-img2img-webui-prompt-bridge.json` | `LoadImage -> VAEEncode` 最小重绘链路 |
 
 ## Anima 最小工作流
 
@@ -60,6 +61,22 @@ waiNSFWIllustrious_v140.safetensors
 ```
 
 如果你的 ComfyUI 里没有这个模型，在 `XL Checkpoint` 节点或 Bridge 面板右侧的模型切换下拉里改成自己的 SDXL / Pony / Illustrious / Noob checkpoint 即可。
+
+## XL 最小图生图工作流
+
+这条链路使用：
+
+```text
+CheckpointLoaderSimple
+-> WebUI Prompt Bridge
+-> LoadImage
+-> VAEEncode
+-> KSampler
+-> VAEDecode
+-> PreviewImage / SaveImage
+```
+
+默认 `denoise` 是 `0.45`，适合保留原图构图并按提示词重绘。想更贴近原图就调低，例如 `0.25`；想变化更大就调高，例如 `0.65`。打开工作流后，先在 `Input Image` 节点选择 `D:\ComfyUI\input` 里的图片，或直接把图片拖进 ComfyUI。
 
 ## 使用步骤
 
