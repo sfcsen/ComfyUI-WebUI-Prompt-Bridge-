@@ -38,7 +38,7 @@ const ACTION_SIDEBAR_MAX_WIDTH = 560;
 const ACTION_SIDEBAR_PROMPT_MIN_WIDTH = 420;
 const LEGACY_PANEL_WIDTH = 1280;
 const LEGACY_PANEL_HEIGHT = 1120;
-const PANEL_MIN_WIDTH = 420;
+const PANEL_MIN_WIDTH = 760;
 const PANEL_MAX_WIDTH = 100000;
 const PANEL_MIN_HEIGHT = 360;
 const PANEL_MAX_HEIGHT = 3200;
@@ -6665,7 +6665,7 @@ function buildPanel(node) {
                 el("div", { class: "webui-bridge-tutorial-grid" }, [
                     el("section", {}, [
                         el("h3", {}, "顶部主控"),
-                        el("p", {}, "最上方可以显示或隐藏右侧控制栏、打开设置、查看教程、接入 WebUI、快速添加 LoRA。隐藏侧栏后会露出节点接口，适合连线。"),
+                        el("p", {}, "最上方可以显示或隐藏右侧控制栏、恢复尺寸、拖宽节点、打开设置、查看教程、接入 WebUI、快速添加 LoRA。隐藏侧栏后会露出节点接口，适合连线。"),
                     ]),
                     el("section", {}, [
                         el("h3", {}, "上下拖拽"),
@@ -7453,6 +7453,39 @@ function buildPanel(node) {
         }, true);
     };
 
+    const installNodeWidthDrag = (handle) => {
+        handle.addEventListener("pointerdown", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            handle.setPointerCapture?.(event.pointerId);
+            holdNodeBottomFit();
+            const startX = event.clientX;
+            const startWidth = node.size?.[0] || DEFAULT_PANEL_WIDTH;
+            const startHeight = node.size?.[1] || DEFAULT_PANEL_HEIGHT;
+            const viewportXScale = resizeTargetViewportXScale(node.__webuiBridgePanel || handle);
+            let moved = false;
+            handle.classList.add("dragging");
+            const onMove = (moveEvent) => {
+                const deltaWidth = (moveEvent.clientX - startX) / viewportXScale;
+                if (!moved && Math.abs(deltaWidth) < 3) return;
+                moved = true;
+                holdNodeBottomFit();
+                setNodeSize(startWidth + deltaWidth, startHeight);
+            };
+            const onUp = () => {
+                handle.classList.remove("dragging");
+                holdNodeBottomFit();
+                scheduleManualResizeSettle();
+                document.removeEventListener("pointermove", onMove, true);
+                document.removeEventListener("pointerup", onUp, true);
+                document.removeEventListener("pointercancel", onUp, true);
+            };
+            document.addEventListener("pointermove", onMove, true);
+            document.addEventListener("pointerup", onUp, true);
+            document.addEventListener("pointercancel", onUp, true);
+        }, true);
+    };
+
     const openLargeEditor = () => {
         const mask = el("div", { class: "webui-bridge-mask" });
         const pos = createPromptRow("Prompt", positive.textarea.value, "Prompt", () => {}, () => {});
@@ -7866,21 +7899,49 @@ function buildPanel(node) {
     let topRow = null;
     let actionColumn = null;
     let actionResizeGrip = null;
+    const getActionColumnWidthDelta = () => {
+        const sidebarWidth = topRow
+            ? Number.parseFloat(getComputedStyle(topRow).getPropertyValue("--webui-bridge-sidebar-width")) || ACTION_SIDEBAR_DEFAULT_WIDTH
+            : ACTION_SIDEBAR_DEFAULT_WIDTH;
+        const gripWidth = topRow?.__webuiBridgeSidebarGrip?.offsetWidth || 30;
+        return Math.ceil(sidebarWidth + gripWidth + gridColumnGap(topRow) * 2);
+    };
+    const resizeNodeForActionCollapsed = () => {
+        if (!topRow || !node.size) return;
+        const currentWidth = node.size?.[0] || DEFAULT_PANEL_WIDTH;
+        const currentHeight = node.size?.[1] || DEFAULT_PANEL_HEIGHT;
+        const delta = getActionColumnWidthDelta();
+        let nextWidth;
+        if (actionCollapsed) {
+            node.__webuiBridgeWidthBeforeActionCollapse = currentWidth;
+            nextWidth = Math.max(PANEL_MIN_WIDTH, currentWidth - delta);
+        } else if (Number.isFinite(node.__webuiBridgeWidthBeforeActionCollapse)) {
+            nextWidth = Math.max(DEFAULT_PANEL_WIDTH, node.__webuiBridgeWidthBeforeActionCollapse);
+            node.__webuiBridgeWidthBeforeActionCollapse = null;
+        } else {
+            nextWidth = currentWidth <= PANEL_MIN_WIDTH + 16
+                ? Math.max(DEFAULT_PANEL_WIDTH, currentWidth + delta)
+                : Math.max(DEFAULT_PANEL_WIDTH, currentWidth);
+        }
+        setNodeSize(nextWidth, currentHeight);
+        scheduleAdaptiveLayout();
+    };
     const actionToggle = el("button", {
         class: "webui-bridge-side-toggle",
         type: "button",
         onclick: () => {
             actionCollapsed = !actionCollapsed;
             writeLocalBoolean(actionCollapsedKey, actionCollapsed);
-            applyActionCollapsedState();
+            applyActionCollapsedState({ resizeNode: true });
         },
     });
-    function applyActionCollapsedState() {
+    function applyActionCollapsedState({ resizeNode = false } = {}) {
         topRow?.classList?.toggle("action-collapsed", actionCollapsed);
         actionColumn?.classList?.toggle("collapsed", actionCollapsed);
         actionResizeGrip?.classList?.toggle("collapsed", actionCollapsed);
         actionToggle.textContent = actionCollapsed ? "显示侧栏" : "隐藏侧栏";
         actionToggle.title = actionCollapsed ? "显示右侧控制栏" : "隐藏右侧控制栏，露出节点接口";
+        if (resizeNode) requestAnimationFrame(resizeNodeForActionCollapsed);
     }
     const topControlButton = (text, title, onclick, extraClass = "") => el("button", {
         class: `webui-bridge-top-control ${extraClass}`.trim(),
@@ -7888,10 +7949,24 @@ function buildPanel(node) {
         title,
         onclick,
     }, text);
+    const nodeWidthGrip = el("div", {
+        class: "webui-bridge-node-width-resizer",
+        role: "separator",
+        "aria-orientation": "vertical",
+        "aria-label": "拖动调整整个节点宽度",
+        title: "左右拖动调整整个节点宽度；如果右下角手柄不在屏幕里，用这里拉宽",
+    }, [
+        el("span", { class: "webui-bridge-node-width-icon" }, "↔"),
+        el("span", { class: "webui-bridge-node-width-text" }, "拖宽节点"),
+    ]);
+    installNodeWidthDrag(nodeWidthGrip);
+
     const topControls = el("div", { class: "webui-bridge-top-controls" }, [
         actionToggle,
         topControlButton("设置", "设置数据来源、翻译、布局、Tag 和 LoRA 卡片显示", showBridgeSettingsDialog, "primary"),
         topControlButton("教程", "查看拖拽、布局、LoRA 和反向提示词使用说明", showBridgeTutorialDialog, "help"),
+        topControlButton("恢复尺寸", "恢复节点默认宽高，避免误点后缩成窄条", () => setNodeSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT)),
+        nodeWidthGrip,
         topControlButton("接入 WebUI", "只填写 WebUI 根目录，自动接入 Prompt All in One、TagComplete、styles、LoRA 和模型目录", showWebUIIntegrationDialog),
         quickLoraOverlayButton = topControlButton("添加 LoRA", "打开 LoRA / LyCORIS 浮层，添加完成后可关闭让节点更紧凑", openLoraOverlay),
         el("label", { class: "webui-bridge-top-field", title: "Default LoRA CLIP strength when tag has no third value" }, [
@@ -8473,7 +8548,8 @@ function addStyles() {
             overflow: visible;
         }
         .webui-bridge-top-control,
-        .webui-bridge-side-toggle {
+        .webui-bridge-side-toggle,
+        .webui-bridge-node-width-resizer {
             flex: 0 0 auto;
             min-width: 76px;
             height: 26px;
@@ -8490,6 +8566,25 @@ function addStyles() {
             box-shadow:
                 inset 0 0 0 1px rgba(255, 255, 255, .08),
                 0 2px 8px rgba(0, 0, 0, .32);
+        }
+        .webui-bridge-node-width-resizer {
+            min-width: 96px;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            user-select: none;
+            touch-action: none;
+        }
+        .webui-bridge-node-width-resizer.dragging {
+            cursor: ew-resize;
+            border-color: #d5e5ff;
+            background: #28517f;
+        }
+        .webui-bridge-node-width-icon {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 14px;
         }
         .webui-bridge-top-control.primary {
             border-color: rgba(164, 198, 255, .95);
