@@ -4,26 +4,31 @@
 
 ## 中文介绍
 
-**ComfyUI WebUI Prompt Bridge** 是一个给 ComfyUI 使用的 WebUI 式提示词编辑节点。它把 WebUI 里顺手的提示词输入、Tag 编辑、中文翻译、自动补全、收藏、负面词管理和 LoRA 检测搬进 ComfyUI，让复杂工作流也能拥有接近 WebUI 的提示词操作体验。
+**ComfyUI WebUI Prompt Bridge** 是一个给 ComfyUI 使用的 WebUI 式提示词工作台。它把 WebUI 里顺手的提示词输入、Tag 编辑、中文翻译、自动补全、收藏、负面词管理、LoRA 浏览/加载、Styles 和区域提示词控制搬进 ComfyUI，让复杂工作流也能拥有接近 WebUI 的提示词操作体验。
 
 很多人用 ComfyUI 时会遇到两个问题：
 
 - ComfyUI 的普通文本框适合连接节点，但不适合大量编辑 Tag。
 - WebUI 的提示词体验很好，但工作流能力不如 ComfyUI 灵活。
 
-这个节点就是把两边的优点合到一起：**ComfyUI 负责工作流，WebUI Prompt Bridge 负责提示词操作**。
+这个节点就是把两边的优点合到一起：**ComfyUI 负责工作流，WebUI Prompt Bridge 负责提示词、LoRA、区域控制和常用生成助手**。
+
+从 v0.4.0 开始，Bridge 默认界面会保持更干净：基础提示词、模型切换、尺寸快捷、布局预设和 LoRA 浏览区会直接显示；区域控制、Styles、ADetailer、ControlNet、SAM/Inpaint、Mask 和放大修复等功能可以在 `设置` 里按需显示。需要高级链路时，侧栏会提供 `一键构建...节点` 按钮，自动创建对应外置节点并连接 Bridge 已知输出。
 
 新用户可以先从中文最小工作流教程开始：`docs/tutorial-minimal-workflows.md`。教程分别演示 Anima 分体模型、XL 整合 checkpoint 和 XL 图生图的最小接线，并配有截图和可直接拖入 ComfyUI 的 JSON 工作流。
 
-## v0.3.2 更新说明
+## v0.4.0 更新说明
 
-这一版继续修复节点布局缩放体验，重点是右下角 `↘` 箭头现在可以更明确地作为 Bridge 节点缩放手柄使用。
+这一版是一次较大的功能更新，重点是把 Bridge 从“提示词编辑节点”升级成更完整的“功能助手侧栏 + 提示词工作台”。
 
-拖动右下角箭头会缩放整个 Bridge 节点，并同步调整 LoRA / Extra Networks 卡片区高度。手柄本身改成更大的蓝色高亮按钮，带明显角标和 hover 状态，避免在复杂节点里找不到。
+- 默认界面更清爽，只保留基础生成、模型切换、尺寸快捷、布局预设和 LoRA 浏览区。
+- 设置窗口改为更宽、更清楚的分组设置中心，可以控制每个侧栏功能是否显示。
+- 区域提示词、区域 conditioning、负向 Common、区域翻转和区域 Preset 变成主节点内置能力。
+- ADetailer、ControlNet、SAM/Inpaint、Mask 区域和放大修复作为高级模块按需显示，并支持一键构建外置节点。
+- 一键构建会提示自动连接数量；遇到接口被占用、节点缺失或后端未加载时，会给出明确原因。
+- 推荐工作流和 3 个最小实例工作流已经同步到新版 Bridge 节点结构。
 
-节点最大高度限制调整为 `3200`，既允许手动拉成长节点浏览 LoRA，也避免大量 LoRA 自动把节点撑到极端高度。LoRA 卡片区仍会保留最小一行高度、底部锚定和内部滚动。
-
-升级后请重启 ComfyUI，并强制刷新浏览器页面，让新的前端脚本和布局缓存版本生效。
+升级后请重启 ComfyUI，并强制刷新浏览器页面，让新的前端脚本、节点搜索别名和布局缓存生效。
 
 完整更新记录见 `CHANGELOG.md`。
 
@@ -31,7 +36,7 @@
 
 ![WebUI Prompt Bridge node close-up](docs/images/webui-prompt-bridge-node-panel.png)
 
-这个节点不是普通的大文本框，而是一个完整的提示词操作面板。新版面板把 Prompt、反向词、模型切换、LoRA 卡片库和常用生成按钮集中到一个节点里：
+这个节点不是普通的大文本框，而是一个完整的提示词操作面板。新版面板把 Prompt、反向词、模型切换、LoRA 卡片库、布局预设、区域控制入口和高级模块助手集中到一个节点里：
 
 - 可以直接输入中文自然语言，并自动翻译成更适合模型的英文提示词。
 - 可以把提示词拆成一个个标签块，方便编辑、删除、禁用、复制、加权和拖拽排序。
@@ -43,6 +48,8 @@
 - 可以在节点内直接浏览 LoRA / LyCORIS 卡片库，按文件夹、分类、模型版本和整理状态过滤。
 - 可以读取 LoRA 预览图、训练 metadata、触发词、推荐权重、说明和手动分类，并在卡片里快速插入。
 - 可以在面板右侧切换分体 Anima/Qwen 或整合 checkpoint，并在提交生成前做常见参数检查。
+- 可以按需显示区域表格、负向 Common、区域翻转和区域 Preset，不需要先额外添加一串区域控制节点。
+- 可以按需显示 ADetailer、ControlNet、SAM/Inpaint、Mask 和放大修复模块，并一键构建可接入工作流的外置节点。
 
 ## 主要功能
 
@@ -301,9 +308,11 @@ https://registry.comfy.org/nodes/comfyui-webui-prompt-bridge
 
 ## English Summary
 
-ComfyUI WebUI Prompt Bridge is a WebUI-style prompt editor for ComfyUI. It supports visual prompt chips, Chinese-to-English prompt translation, autocomplete, favorites, styles, prompt history, LoRA tag parsing and real LoRA application through ComfyUI model / CLIP objects.
+ComfyUI WebUI Prompt Bridge is a WebUI-style prompt workspace for ComfyUI. It combines visual prompt chips, Chinese-to-English translation, tag autocomplete, favorites, styles, prompt history, LoRA browsing/loading, regional prompts, layout presets and optional helper modules inside one Bridge node.
 
-The repository includes a recommended Anima workflow with lazy model switching, HiRes, detailers, pose/reference branches and multiple upscale output modes.
+The default UI stays clean for everyday prompt editing, model switching, image size controls and LoRA browsing. Regional controls and advanced helpers such as ADetailer, ControlNet, SAM/Inpaint, Mask and upscale workflows can be shown only when needed. Advanced helper panels can also build external workflow nodes and connect the known Bridge outputs automatically.
+
+The repository includes a recommended Anima workflow and minimal tutorial workflows for Anima, XL txt2img and XL img2img. The included workflows have been updated for the v0.4.0 Bridge schema.
 
 ## License
 
