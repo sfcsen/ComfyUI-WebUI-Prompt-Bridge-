@@ -3600,9 +3600,9 @@ class WebUIPromptBridge:
                 "module_upscale_enabled": ("BOOLEAN", {"default": False}),
                 "module_upscale_mode": (["hires_fix", "ultimate_sd_upscale", "latent_upscale", "tile"], {"default": "hires_fix"}),
                 "module_upscale_by": ("FLOAT", {"default": 2.0, "min": 1.0, "max": 8.0, "step": 0.05}),
-                "module_upscale_upscaler": ("STRING", {"default": "Latent", "multiline": False}),
-                "module_upscale_steps": ("INT", {"default": 12, "min": 0, "max": 150, "step": 1}),
-                "module_upscale_denoise": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "module_upscale_upscaler": ("STRING", {"default": "nearest-exact", "multiline": False}),
+                "module_upscale_steps": ("INT", {"default": 18, "min": 0, "max": 150, "step": 1}),
+                "module_upscale_denoise": ("FLOAT", {"default": 0.48, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "module_upscale_tile_width": ("INT", {"default": 768, "min": 128, "max": 4096, "step": 8}),
                 "module_upscale_tile_height": ("INT", {"default": 768, "min": 128, "max": 4096, "step": 8}),
                 "module_upscale_overlap": ("INT", {"default": 64, "min": 0, "max": 1024, "step": 8}),
@@ -3683,9 +3683,9 @@ class WebUIPromptBridge:
         module_upscale_enabled=False,
         module_upscale_mode="hires_fix",
         module_upscale_by=2.0,
-        module_upscale_upscaler="Latent",
-        module_upscale_steps=12,
-        module_upscale_denoise=0.35,
+        module_upscale_upscaler="nearest-exact",
+        module_upscale_steps=18,
+        module_upscale_denoise=0.48,
         module_upscale_tile_width=768,
         module_upscale_tile_height=768,
         module_upscale_overlap=64,
@@ -3802,9 +3802,9 @@ class WebUIPromptBridge:
                     "enabled": bool(module_upscale_enabled),
                     "mode": str(module_upscale_mode or "hires_fix"),
                     "scale_by": _bounded_float(module_upscale_by, 2.0, 1.0, 8.0),
-                    "upscaler": str(module_upscale_upscaler or "Latent"),
-                    "steps": _bounded_int(module_upscale_steps, 12, 0, 150),
-                    "denoise": _bounded_float(module_upscale_denoise, 0.35, 0.0, 1.0),
+                    "upscaler": str(module_upscale_upscaler or "nearest-exact"),
+                    "steps": _bounded_int(module_upscale_steps, 18, 0, 150),
+                    "denoise": _bounded_float(module_upscale_denoise, 0.48, 0.0, 1.0),
                     "tile_width": _bounded_int(module_upscale_tile_width, 768, 128, 4096),
                     "tile_height": _bounded_int(module_upscale_tile_height, 768, 128, 4096),
                     "overlap": _bounded_int(module_upscale_overlap, 64, 0, 1024),
@@ -3962,7 +3962,7 @@ class WebUIPromptBridge:
             try:
                 upscale_denoise = min(1.0, max(0.0, float(module_upscale_denoise)))
             except (TypeError, ValueError):
-                upscale_denoise = 0.35
+                upscale_denoise = 0.48
             try:
                 tile_width = max(128, int(module_upscale_tile_width))
             except (TypeError, ValueError):
@@ -3977,7 +3977,7 @@ class WebUIPromptBridge:
                 tile_overlap = 64
             module_info.append(
                 "Upscale module=on "
-                f"mode={module_upscale_mode} by={upscale_by:g} upscaler={str(module_upscale_upscaler or 'Latent')[:80]} "
+                f"mode={module_upscale_mode} by={upscale_by:g} upscaler={str(module_upscale_upscaler or 'nearest-exact')[:80]} "
                 f"steps={upscale_steps} denoise={upscale_denoise:g} tile={tile_width}x{tile_height} overlap={tile_overlap}"
             )
         if module_regional_lora_enabled:

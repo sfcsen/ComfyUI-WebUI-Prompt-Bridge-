@@ -6333,8 +6333,8 @@ function buildPanel(node) {
     ]);
     const moduleUpscaleByInput = moduleNumber(moduleUpscaleByWidget, 2, { min: "1", max: "8", step: "0.05" });
     const moduleUpscaleUpscalerInput = moduleText(moduleUpscaleUpscalerWidget, "Latent", 1);
-    const moduleUpscaleStepsInput = moduleNumber(moduleUpscaleStepsWidget, 12, { min: "0", max: "150", step: "1" });
-    const moduleUpscaleDenoiseInput = moduleNumber(moduleUpscaleDenoiseWidget, 0.35, { min: "0", max: "1", step: "0.01" });
+    const moduleUpscaleStepsInput = moduleNumber(moduleUpscaleStepsWidget, 18, { min: "0", max: "150", step: "1" });
+    const moduleUpscaleDenoiseInput = moduleNumber(moduleUpscaleDenoiseWidget, 0.48, { min: "0", max: "1", step: "0.01" });
     const moduleUpscaleTileWidthInput = moduleNumber(moduleUpscaleTileWidthWidget, 768, { min: "128", max: "4096", step: "8" });
     const moduleUpscaleTileHeightInput = moduleNumber(moduleUpscaleTileHeightWidget, 768, { min: "128", max: "4096", step: "8" });
     const moduleUpscaleOverlapInput = moduleNumber(moduleUpscaleOverlapWidget, 64, { min: "0", max: "1024", step: "8" });
@@ -6381,12 +6381,67 @@ function buildPanel(node) {
         setWidgetValue(node, "module_upscale_mode", moduleUpscaleModeInput.value);
         setWidgetValue(node, "module_upscale_by", normalizeClipStrength(moduleUpscaleByInput.value, 2));
         setWidgetValue(node, "module_upscale_upscaler", moduleUpscaleUpscalerInput.value.trim());
-        setWidgetValue(node, "module_upscale_steps", Math.max(0, Math.round(normalizeClipStrength(moduleUpscaleStepsInput.value, 12))));
-        setWidgetValue(node, "module_upscale_denoise", normalizeClipStrength(moduleUpscaleDenoiseInput.value, 0.35));
+        setWidgetValue(node, "module_upscale_steps", Math.max(0, Math.round(normalizeClipStrength(moduleUpscaleStepsInput.value, 18))));
+        setWidgetValue(node, "module_upscale_denoise", normalizeClipStrength(moduleUpscaleDenoiseInput.value, 0.48));
         setWidgetValue(node, "module_upscale_tile_width", Math.max(128, Math.round(normalizeClipStrength(moduleUpscaleTileWidthInput.value, 768))));
         setWidgetValue(node, "module_upscale_tile_height", Math.max(128, Math.round(normalizeClipStrength(moduleUpscaleTileHeightInput.value, 768))));
         setWidgetValue(node, "module_upscale_overlap", Math.max(0, Math.round(normalizeClipStrength(moduleUpscaleOverlapInput.value, 64))));
         setWidgetValue(node, "module_regional_lora_enabled", moduleRegionalLoraEnabledInput.checked);
+    };
+    const moduleControlBindings = [
+        [moduleTableEnabledInput, "checked"],
+        [moduleMaskEnabledInput, "checked"],
+        [moduleMaskStrengthInput, "value"],
+        [moduleMaskBoundsInput, "checked"],
+        [moduleNegativeCommonEnabledInput, "checked"],
+        [moduleNegativeCommonPromptInput, "value"],
+        [moduleFlipEnabledInput, "checked"],
+        [moduleFlipAxisInput, "value"],
+        [modulePresetsEnabledInput, "checked"],
+        [moduleAdetailerEnabledInput, "checked"],
+        [moduleAdetailerModelInput, "value"],
+        [moduleAdetailerPromptInput, "value"],
+        [moduleAdetailerNegativePromptInput, "value"],
+        [moduleAdetailerConfidenceInput, "value"],
+        [moduleAdetailerMaskBlurInput, "value"],
+        [moduleAdetailerDenoiseInput, "value"],
+        [moduleAdetailerInpaintOnlyMaskedInput, "checked"],
+        [moduleAdetailerCyclesInput, "value"],
+        [moduleControlnetEnabledInput, "checked"],
+        [moduleControlnetPreprocessorInput, "value"],
+        [moduleControlnetModelInput, "value"],
+        [moduleControlnetWeightInput, "value"],
+        [moduleControlnetStartInput, "value"],
+        [moduleControlnetEndInput, "value"],
+        [moduleControlnetResizeModeInput, "value"],
+        [moduleControlnetControlModeInput, "value"],
+        [moduleControlnetPixelPerfectInput, "checked"],
+        [moduleSamEnabledInput, "checked"],
+        [moduleSamModelInput, "value"],
+        [moduleSamPromptModeInput, "value"],
+        [moduleSamConfidenceInput, "value"],
+        [moduleSamMaskBlurInput, "value"],
+        [moduleSamDilateInput, "value"],
+        [moduleSamInpaintDenoiseInput, "value"],
+        [moduleSamInpaintAreaInput, "value"],
+        [moduleSamPaddingInput, "value"],
+        [moduleUpscaleEnabledInput, "checked"],
+        [moduleUpscaleModeInput, "value"],
+        [moduleUpscaleByInput, "value"],
+        [moduleUpscaleUpscalerInput, "value"],
+        [moduleUpscaleStepsInput, "value"],
+        [moduleUpscaleDenoiseInput, "value"],
+        [moduleUpscaleTileWidthInput, "value"],
+        [moduleUpscaleTileHeightInput, "value"],
+        [moduleUpscaleOverlapInput, "value"],
+        [moduleRegionalLoraEnabledInput, "checked"],
+    ];
+    const captureModuleControlSnapshot = () => moduleControlBindings.map(([control, prop]) => [control, prop, control[prop]]);
+    const restoreModuleControlSnapshot = (snapshot = []) => {
+        for (const [control, prop, value] of snapshot) {
+            if (control) control[prop] = value;
+        }
+        syncModuleWidgets();
     };
     for (const control of moduleControls) {
         control.addEventListener("input", syncModuleWidgets);
@@ -6420,7 +6475,7 @@ function buildPanel(node) {
         }
         return (list || []).findIndex((slot) => slot?.name === name);
     };
-    const connectGraphSlots = (fromNode, outputName, toNode, inputName, report = null) => {
+    const connectGraphSlots = (fromNode, outputName, toNode, inputName, report = null, options = {}) => {
         if (!fromNode || !toNode) {
             const source = fromNode?.title || fromNode?.type || "源节点未创建";
             const target = toNode?.title || toNode?.type || "目标节点未创建";
@@ -6440,8 +6495,12 @@ function buildPanel(node) {
         }
         const input = toNode.inputs?.[inputSlot];
         if (input?.link != null) {
-            report?.warnings?.push(`输入已被占用，未覆盖: ${label}`);
-            return false;
+            if (options.replace) {
+                disconnectInput(toNode, inputSlot);
+            } else {
+                report?.warnings?.push(`输入已被占用，未覆盖: ${label}`);
+                return false;
+            }
         }
         try {
             fromNode.connect(outputSlot, toNode, inputSlot);
@@ -6451,6 +6510,206 @@ function buildPanel(node) {
         }
         report?.connected?.push(label);
         return true;
+    };
+    const graphNodeLabel = (graphNode) => graphNode?.title || graphNode?.type || `Node ${graphNode?.id || "?"}`;
+    const inputLinkInfo = (targetNode, inputName) => {
+        const inputSlot = graphSlotIndex(targetNode, "input", inputName);
+        const link = getGraphLink(targetNode?.inputs?.[inputSlot]?.link);
+        if (!link) return null;
+        return {
+            inputSlot,
+            link,
+            source: getGraphNodeById(linkOriginId(link)),
+            sourceSlot: linkOriginSlot(link),
+        };
+    };
+    const outputLinkedTargets = (sourceNode, outputSlot) => {
+        const output = sourceNode?.outputs?.[outputSlot];
+        if (!Array.isArray(output?.links)) return [];
+        return output.links
+            .map((linkId) => {
+                const link = getGraphLink(linkId);
+                const target = getGraphNodeById(linkTargetId(link));
+                return target ? { link, target, inputSlot: linkTargetSlot(link) } : null;
+            })
+            .filter(Boolean);
+    };
+    const findBridgeDrivenSampler = () => {
+        const candidates = getGraphNodes().filter((graphNode) => {
+            const text = `${graphNode?.type || ""} ${graphNode?.title || ""}`.toLowerCase();
+            if (!text.includes("ksampler") && graphSlotIndex(graphNode, "input", "latent_image") < 0) return false;
+            const positive = inputLinkInfo(graphNode, "positive");
+            const negative = inputLinkInfo(graphNode, "negative");
+            const model = inputLinkInfo(graphNode, "model");
+            return positive?.source === node || negative?.source === node || model?.source === node;
+        });
+        return candidates.sort((a, b) => {
+            const aScore = (inputLinkInfo(a, "positive")?.source === node ? 2 : 0) + (inputLinkInfo(a, "negative")?.source === node ? 2 : 0) + (inputLinkInfo(a, "model")?.source === node ? 1 : 0);
+            const bScore = (inputLinkInfo(b, "positive")?.source === node ? 2 : 0) + (inputLinkInfo(b, "negative")?.source === node ? 2 : 0) + (inputLinkInfo(b, "model")?.source === node ? 1 : 0);
+            return bScore - aScore;
+        })[0] || null;
+    };
+    const rememberInputReplacement = (targetNode, inputSlot, report) => {
+        const captured = captureInputLink(targetNode, inputSlot);
+        if (captured) report?.replacedLinks?.push(captured);
+        return captured;
+    };
+    const connectGraphSlotsByIndex = (fromNode, outputSlot, toNode, inputSlot, report, label) => {
+        if (!fromNode || !toNode || outputSlot < 0 || inputSlot < 0) {
+            report?.warnings?.push(`无法连接: ${label}`);
+            return false;
+        }
+        rememberInputReplacement(toNode, inputSlot, report);
+        connectNodes(fromNode, outputSlot, toNode, inputSlot);
+        report?.connected?.push(label);
+        return true;
+    };
+    const copySamplerWidgetValue = (sourceNode, targetNode, widgetName, fallback = undefined) => {
+        const sourceWidget = getWidget(sourceNode, widgetName);
+        const value = sourceWidget?.value ?? fallback;
+        if (value !== undefined) return setNodeWidgetValue(targetNode, widgetName, value);
+        return false;
+    };
+    const configureHiresSampler = (sourceSampler, hiresSampler) => {
+        if (!hiresSampler) return;
+        copySamplerWidgetValue(sourceSampler, hiresSampler, "seed");
+        copySamplerWidgetValue(sourceSampler, hiresSampler, "control_after_generate");
+        copySamplerWidgetValue(sourceSampler, hiresSampler, "cfg", 5);
+        copySamplerWidgetValue(sourceSampler, hiresSampler, "sampler_name", "euler");
+        copySamplerWidgetValue(sourceSampler, hiresSampler, "scheduler", "normal");
+        setNodeWidgetValue(hiresSampler, "steps", Math.max(1, Math.round(normalizeClipStrength(moduleUpscaleStepsInput.value, 18))));
+        setNodeWidgetValue(hiresSampler, "denoise", Math.max(0.01, Math.min(1, normalizeClipStrength(moduleUpscaleDenoiseInput.value, 0.48))));
+    };
+    const applyHiresSharpDefaults = () => {
+        const mode = moduleUpscaleModeInput.value || "hires_fix";
+        if (mode !== "hires_fix" && mode !== "latent_upscale") return false;
+        const steps = Math.round(normalizeClipStrength(moduleUpscaleStepsInput.value, 18));
+        const denoise = normalizeClipStrength(moduleUpscaleDenoiseInput.value, 0.48);
+        const upscaler = String(moduleUpscaleUpscalerInput.value || "").trim().toLowerCase();
+        const looksLikeOldDefault = steps <= 12 && denoise <= 0.36 && (!upscaler || upscaler === "latent" || upscaler === "bislerp");
+        if (!looksLikeOldDefault) return false;
+        moduleUpscaleStepsInput.value = "18";
+        moduleUpscaleDenoiseInput.value = "0.48";
+        moduleUpscaleUpscalerInput.value = "nearest-exact";
+        syncModuleWidgets();
+        return true;
+    };
+    const connectMatchingInputSource = (sourceNode, sourceInputName, targetNode, targetInputName, report) => {
+        const info = inputLinkInfo(sourceNode, sourceInputName);
+        const targetSlot = graphSlotIndex(targetNode, "input", targetInputName);
+        if (!info?.source || targetSlot < 0) return false;
+        return connectGraphSlotsByIndex(
+            info.source,
+            info.sourceSlot,
+            targetNode,
+            targetSlot,
+            report,
+            `${graphNodeLabel(info.source)} -> ${graphNodeLabel(targetNode)}.${targetInputName}`
+        );
+    };
+    const insertLatentUpscaleIntoMainRoute = (latentNode, hiresSampler, report) => {
+        const sampler = findBridgeDrivenSampler();
+        if (!sampler) {
+            report?.warnings?.push("没有找到当前 Bridge 驱动的 KSampler 主链路，放大节点需要手动接入。");
+            return false;
+        }
+        const samplerOutputSlot = outputSlotForType(sampler, "LATENT", 0);
+        const targets = outputLinkedTargets(sampler, samplerOutputSlot)
+            .filter(({ target, inputSlot }) => {
+                const input = target?.inputs?.[inputSlot];
+                const text = `${target?.type || ""} ${target?.title || ""}`.toLowerCase();
+                return input?.name === "samples" || text.includes("vaedecode");
+            });
+        if (!targets.length) {
+            report?.warnings?.push(`找到了 ${graphNodeLabel(sampler)}，但没有找到它后面的 VAE Decode.samples，放大节点需要手动接入。`);
+            return false;
+        }
+        const latentInputSlot = graphSlotIndex(latentNode, "input", "samples");
+        const latentOutputSlot = graphSlotIndex(latentNode, "output", "latent");
+        const hiresLatentInputSlot = graphSlotIndex(hiresSampler, "input", "latent_image");
+        const hiresOutputSlot = outputSlotForType(hiresSampler, "LATENT", 0);
+        if (!hiresSampler || hiresLatentInputSlot < 0 || hiresOutputSlot < 0) {
+            report?.warnings?.push("没有创建可用的 Hires KSampler，放大节点需要手动接入。");
+            return false;
+        }
+        configureHiresSampler(sampler, hiresSampler);
+        const connectedIn = connectGraphSlotsByIndex(
+            sampler,
+            samplerOutputSlot,
+            latentNode,
+            latentInputSlot,
+            report,
+            `${graphNodeLabel(sampler)}.LATENT -> ${graphNodeLabel(latentNode)}.samples`
+        );
+        const connectedHiresInputs = ["model", "positive", "negative"]
+            .map((inputName) => connectMatchingInputSource(sampler, inputName, hiresSampler, inputName, report))
+            .filter(Boolean).length;
+        const connectedToHires = connectGraphSlotsByIndex(
+            latentNode,
+            latentOutputSlot,
+            hiresSampler,
+            hiresLatentInputSlot,
+            report,
+            `${graphNodeLabel(latentNode)}.latent -> ${graphNodeLabel(hiresSampler)}.latent_image`
+        );
+        let connectedOut = 0;
+        for (const { target, inputSlot } of targets) {
+            if (connectGraphSlotsByIndex(
+                hiresSampler,
+                hiresOutputSlot,
+                target,
+                inputSlot,
+                report,
+                `${graphNodeLabel(hiresSampler)}.LATENT -> ${graphNodeLabel(target)}.${target.inputs?.[inputSlot]?.name || inputSlot}`
+            )) connectedOut += 1;
+        }
+        if (connectedIn && connectedToHires && connectedOut) {
+            report.manualHint = `已构建 Hires.fix 主链路：原 KSampler -> Latent Upscale -> Hires KSampler -> VAE Decode；二次采样 steps=${Math.max(1, Math.round(normalizeClipStrength(moduleUpscaleStepsInput.value, 18)))} denoise=${Math.max(0.01, Math.min(1, normalizeClipStrength(moduleUpscaleDenoiseInput.value, 0.48))).toFixed(2)}${connectedHiresInputs < 3 ? "；部分采样输入需要手动确认" : ""}`;
+            return true;
+        }
+        return false;
+    };
+    const insertImageUpscaleIntoMainRoute = (imageNode, report) => {
+        const imageSources = getGraphNodes().filter((graphNode) => {
+            const imageSlot = outputSlotForType(graphNode, "IMAGE", -1);
+            if (imageSlot < 0) return false;
+            const text = `${graphNode?.type || ""} ${graphNode?.title || ""}`.toLowerCase();
+            return text.includes("vaedecode") || outputLinkedTargets(graphNode, imageSlot).some(({ target }) => /preview|save|gallery/i.test(`${target?.type || ""} ${target?.title || ""}`));
+        });
+        const source = imageSources[0] || null;
+        const sourceOutputSlot = outputSlotForType(source, "IMAGE", -1);
+        const targets = outputLinkedTargets(source, sourceOutputSlot)
+            .filter(({ target, inputSlot }) => {
+                const input = target?.inputs?.[inputSlot];
+                return input?.name === "images" || slotTypesCompatible(source?.outputs?.[sourceOutputSlot]?.type, input?.type);
+            });
+        if (!source || !targets.length) return false;
+        const imageInputSlot = graphSlotIndex(imageNode, "input", "image");
+        const imageOutputSlot = graphSlotIndex(imageNode, "output", "image");
+        const connectedIn = connectGraphSlotsByIndex(
+            source,
+            sourceOutputSlot,
+            imageNode,
+            imageInputSlot,
+            report,
+            `${graphNodeLabel(source)}.IMAGE -> ${graphNodeLabel(imageNode)}.image`
+        );
+        let connectedOut = 0;
+        for (const { target, inputSlot } of targets) {
+            if (connectGraphSlotsByIndex(
+                imageNode,
+                imageOutputSlot,
+                target,
+                inputSlot,
+                report,
+                `${graphNodeLabel(imageNode)}.image -> ${graphNodeLabel(target)}.${target.inputs?.[inputSlot]?.name || inputSlot}`
+            )) connectedOut += 1;
+        }
+        if (connectedIn && connectedOut) {
+            report.manualHint = "已把 Image Upscale 插入当前 VAE Decode -> Preview/Save 输出链路";
+            return true;
+        }
+        return false;
     };
     const createBridgeModuleGraphNode = (type, title, x, y, report = null) => {
         let graphNode = null;
@@ -6473,6 +6732,48 @@ function buildPanel(node) {
         }
         return graphNode;
     };
+    const moduleBuildHistory = [];
+    const restoreButtons = [];
+    const updateModuleRestoreButtons = () => {
+        for (const button of restoreButtons) {
+            const kind = button.dataset.moduleKind;
+            button.disabled = !moduleBuildHistory.some((item) => item.kind === kind);
+        }
+    };
+    const removeCreatedGraphNode = (graphNode) => {
+        if (!graphNode || !getGraphNodeById(graphNode.id)) return false;
+        try {
+            app.graph.remove?.(graphNode);
+            return true;
+        } catch {
+            return false;
+        }
+    };
+    const restoreLastModuleBuild = (kind) => {
+        const index = moduleBuildHistory.map((item) => item.kind).lastIndexOf(kind);
+        if (index < 0) {
+            setStatus("没有可还原的构建记录", { kind: "warning" });
+            updateModuleRestoreButtons();
+            return;
+        }
+        const session = moduleBuildHistory.splice(index, 1)[0];
+        let restoredLinks = 0;
+        const restoredTargets = new Set();
+        for (const captured of [...(session.replacedLinks || [])].reverse()) {
+            const key = `${captured.targetId}:${captured.targetSlot}`;
+            if (restoredTargets.has(key)) continue;
+            if (restoreCapturedLink(captured)) restoredLinks += 1;
+            restoredTargets.add(key);
+        }
+        let removedNodes = 0;
+        for (const graphNode of [...(session.created || [])].reverse()) {
+            if (removeCreatedGraphNode(graphNode)) removedNodes += 1;
+        }
+        restoreModuleControlSnapshot(session.moduleControls);
+        app.graph.setDirtyCanvas?.(true, true);
+        updateModuleRestoreButtons();
+        setStatus(`已还原 ${session.label} 构建：删除 ${removedNodes} 个外置节点，恢复 ${restoredLinks} 条线`, { kind: "success", sticky: true });
+    };
     const bridgeNodeGraphPosition = () => {
         const x = Number(node.pos?.[0]) || 0;
         const y = Number(node.pos?.[1]) || 0;
@@ -6493,7 +6794,7 @@ function buildPanel(node) {
         if (created[0]) {
             app.canvas.selectNode?.(created[0]);
         }
-        const missingInputs = "未自动连接的 IMAGE / VAE / MASK / CONTROL_NET 等接口，需要按当前工作流手动接入";
+        const missingInputs = report?.manualHint || "未自动连接的 IMAGE / VAE / MASK / CONTROL_NET 等接口，需要按当前工作流手动接入";
         const details = [];
         if (report?.errors?.length) details.push(`失败: ${report.errors.slice(0, 3).join("；")}`);
         if (report?.warnings?.length) details.push(`注意: ${report.warnings.slice(0, 4).join("；")}`);
@@ -6502,7 +6803,8 @@ function buildPanel(node) {
         setStatus(`${prefix}，已自动连接 ${report?.connected?.length || 0} 条线；${missingInputs}${details.length ? `；${details.join("；")}` : ""}`, { kind, sticky: true });
     };
     const buildExternalModuleNodes = (kind) => {
-        const report = { connected: [], warnings: [], errors: [] };
+        const report = { connected: [], warnings: [], errors: [], replacedLinks: [] };
+        const moduleControlsSnapshot = captureModuleControlSnapshot();
         try {
             syncModuleWidgets();
         } catch (error) {
@@ -6530,6 +6832,8 @@ function buildPanel(node) {
             connectGraphSlots(node, "positive", inpaint, "positive", report);
             connectGraphSlots(node, "negative", inpaint, "negative", report);
             connectGraphSlots(node, "module_config", inpaint, "module_config", report);
+            moduleBuildHistory.push({ kind, label: "Mask / Inpaint", created: [...created], replacedLinks: [...report.replacedLinks], moduleControls: moduleControlsSnapshot });
+            updateModuleRestoreButtons();
             finishModuleGraphBuild(created, "Mask / Inpaint", report);
             return;
         }
@@ -6547,6 +6851,8 @@ function buildPanel(node) {
             connectGraphSlots(node, "module_config", apply, "module_config", report);
             connectGraphSlots(conditioning, "positive", apply, "positive", report);
             connectGraphSlots(conditioning, "negative", apply, "negative", report);
+            moduleBuildHistory.push({ kind, label: "ADetailer", created: [...created], replacedLinks: [...report.replacedLinks], moduleControls: moduleControlsSnapshot });
+            updateModuleRestoreButtons();
             finishModuleGraphBuild(created, "ADetailer", report);
             return;
         }
@@ -6557,6 +6863,8 @@ function buildPanel(node) {
             connectGraphSlots(node, "positive", apply, "positive", report);
             connectGraphSlots(node, "negative", apply, "negative", report);
             connectGraphSlots(node, "module_config", apply, "module_config", report);
+            moduleBuildHistory.push({ kind, label: "ControlNet", created: [...created], replacedLinks: [...report.replacedLinks], moduleControls: moduleControlsSnapshot });
+            updateModuleRestoreButtons();
             finishModuleGraphBuild(created, "ControlNet", report);
             return;
         }
@@ -6570,16 +6878,36 @@ function buildPanel(node) {
             connectGraphSlots(node, "positive", inpaint, "positive", report);
             connectGraphSlots(node, "negative", inpaint, "negative", report);
             connectGraphSlots(node, "module_config", inpaint, "module_config", report);
+            moduleBuildHistory.push({ kind, label: "SAM / Inpaint", created: [...created], replacedLinks: [...report.replacedLinks], moduleControls: moduleControlsSnapshot });
+            updateModuleRestoreButtons();
             finishModuleGraphBuild(created, "SAM / Inpaint", report);
             return;
         }
         if (kind === "upscale") {
             moduleUpscaleEnabledInput.checked = true;
+            const upgradedSharpDefaults = applyHiresSharpDefaults();
             syncModuleWidgets();
-            const image = make("WebUIPromptBridgeImageUpscale", "Image Upscale", 0, 0);
-            const latent = make("WebUIPromptBridgeLatentUpscale", "Latent Upscale", 0, 180);
-            connectGraphSlots(node, "module_config", image, "module_config", report);
+            const mode = moduleUpscaleModeInput.value || "hires_fix";
+            const latent = make("WebUIPromptBridgeLatentUpscale", "Latent Upscale", 0, 0);
+            const hires = make("KSampler", "Hires.fix KSampler", 420, 0);
+            setNodeWidgetValue(latent, "fallback_method", "nearest-exact");
             connectGraphSlots(node, "module_config", latent, "module_config", report);
+            const insertedLatent = insertLatentUpscaleIntoMainRoute(latent, hires, report);
+            if (upgradedSharpDefaults) {
+                report.warnings.push("已把旧版偏糊的 Hires.fix 默认值升级为清晰优先：nearest-exact / steps 18 / denoise 0.48。");
+            }
+            if (!insertedLatent) {
+                let image = null;
+                if (mode === "ultimate_sd_upscale" || mode === "tile") {
+                    image = make("WebUIPromptBridgeImageUpscale", "Image Upscale", 0, 220);
+                    connectGraphSlots(node, "module_config", image, "module_config", report);
+                }
+                if (!image || !insertImageUpscaleIntoMainRoute(image, report)) {
+                    report.warnings.push("放大节点已创建，但没有找到可自动改线的 KSampler/VAE/Preview 主链路。真正 Hires.fix 需要接成：原 KSampler.LATENT -> Latent Upscale.samples -> Hires KSampler.latent_image -> VAE Decode.samples。");
+                }
+            }
+            moduleBuildHistory.push({ kind, label: "放大修复", created: [...created], replacedLinks: [...report.replacedLinks], moduleControls: moduleControlsSnapshot });
+            updateModuleRestoreButtons();
             finishModuleGraphBuild(created, "放大修复", report);
             return;
         }
@@ -6589,6 +6917,21 @@ function buildPanel(node) {
         type: "button",
         onclick: () => buildExternalModuleNodes(kind),
     }, label);
+    const restoreModuleButton = (kind, label = "还原上次构建") => {
+        const button = el("button", {
+            class: "webui-bridge-module-button webui-bridge-module-button-secondary",
+            type: "button",
+            disabled: "disabled",
+            onclick: () => restoreLastModuleBuild(kind),
+        }, label);
+        button.dataset.moduleKind = kind;
+        restoreButtons.push(button);
+        return button;
+    };
+    const moduleBuildActions = (kind, label) => el("div", { class: "webui-bridge-module-actions" }, [
+        buildModuleButton(kind, label),
+        restoreModuleButton(kind),
+    ]);
     const regionalModuleSection = el("div", { class: "webui-bridge-modules" }, [
         moduleSection("module_table", "区域表格", moduleTableEnabledInput, [
             moduleHint("启用后后端会记录模块状态；按钮可把表格内容回写为 BREAK 区域文本。"),
@@ -6598,7 +6941,7 @@ function buildPanel(node) {
             moduleHint("连接本节点可选 MASK 输入后，启用会把 mask 写入正向 conditioning；也可把 module_config 接到 WebUI Bridge Set Latent Mask。"),
             el("label", {}, [el("span", {}, "强度"), moduleMaskStrengthInput]),
             el("label", { class: "webui-bridge-module-check" }, [moduleMaskBoundsInput, el("span", {}, "Mask 决定采样边界")]),
-            buildModuleButton("mask", "一键构建 Mask/Inpaint 节点"),
+            moduleBuildActions("mask", "一键构建 Mask/Inpaint 节点"),
             el("button", { class: "webui-bridge-module-button", type: "button", onclick: showMaskModule }, "查看接入方式"),
         ]),
         moduleSection("module_negative_common", "负向 Common", moduleNegativeCommonEnabledInput, [
@@ -6660,7 +7003,7 @@ function buildPanel(node) {
                     syncModuleWidgets();
                 } }, "手部模板"),
             ]),
-            buildModuleButton("adetailer", "一键构建 ADetailer 节点"),
+            moduleBuildActions("adetailer", "一键构建 ADetailer 节点"),
             refreshModuleAssetsButton(),
             installModuleAssetsButton(["impact_pack", "impact_subpack"], "安装检测节点包"),
         ]),
@@ -6701,7 +7044,7 @@ function buildPanel(node) {
                     syncModuleWidgets();
                 } }, "OpenPose 模板"),
             ]),
-            buildModuleButton("controlnet", "一键构建 ControlNet 节点"),
+            moduleBuildActions("controlnet", "一键构建 ControlNet 节点"),
             refreshModuleAssetsButton(),
             installModuleAssetsButton(["controlnet_aux"], "安装预处理节点包"),
         ]),
@@ -6733,7 +7076,7 @@ function buildPanel(node) {
                 } }, "局部重绘模板"),
                 el("button", { class: "webui-bridge-module-button", type: "button", onclick: showMaskModule }, "Mask 接入"),
             ]),
-            buildModuleButton("sam", "一键构建 SAM/Inpaint 节点"),
+            moduleBuildActions("sam", "一键构建 SAM/Inpaint 节点"),
             refreshModuleAssetsButton(),
             installModuleAssetsButton(["segment_anything"], "安装 SAM 节点包"),
         ]),
@@ -6755,9 +7098,9 @@ function buildPanel(node) {
                     moduleUpscaleEnabledInput.checked = true;
                     moduleUpscaleModeInput.value = "hires_fix";
                     moduleUpscaleByInput.value = "2";
-                    moduleUpscaleUpscalerInput.value = "Latent";
-                    moduleUpscaleStepsInput.value = "12";
-                    moduleUpscaleDenoiseInput.value = "0.35";
+                    moduleUpscaleUpscalerInput.value = "nearest-exact";
+                    moduleUpscaleStepsInput.value = "18";
+                    moduleUpscaleDenoiseInput.value = "0.48";
                     syncModuleWidgets();
                 } }, "Hires.fix"),
                 el("button", { class: "webui-bridge-module-button", type: "button", onclick: () => {
@@ -6773,7 +7116,7 @@ function buildPanel(node) {
                     syncModuleWidgets();
                 } }, "Ultimate"),
             ]),
-            buildModuleButton("upscale", "一键构建放大节点"),
+            moduleBuildActions("upscale", "一键构建放大节点"),
             refreshModuleAssetsButton(),
             installModuleAssetsButton(["ultimate_upscale"], "安装 Ultimate 节点包"),
         ]),
@@ -12763,6 +13106,15 @@ function addStyles() {
         .webui-bridge-preset-list button:hover {
             border-color: #5d9bff;
             filter: brightness(1.08);
+        }
+        .webui-bridge-module-button-secondary {
+            background: #182236;
+            color: #c9d6ea;
+        }
+        .webui-bridge-module-button:disabled {
+            cursor: default;
+            opacity: .48;
+            filter: none;
         }
         .webui-bridge-settings-panel {
             width: min(1040px, calc(100vw - 48px));
