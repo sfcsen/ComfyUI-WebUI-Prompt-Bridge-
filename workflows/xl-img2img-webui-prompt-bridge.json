@@ -100,36 +100,555 @@
           "label": "positive_prompt",
           "name": "positive_prompt",
           "type": "STRING",
+          "link": null,
           "widget": {
             "name": "positive_prompt"
-          },
-          "link": null
+          }
         },
         {
           "label": "negative_prompt",
           "name": "negative_prompt",
           "type": "STRING",
+          "link": null,
           "widget": {
             "name": "negative_prompt"
-          },
-          "link": null
+          }
         },
         {
           "label": "default_clip_strength",
           "name": "default_clip_strength",
           "type": "FLOAT",
+          "link": null,
           "widget": {
             "name": "default_clip_strength"
-          },
-          "link": null
+          }
         },
         {
           "label": "fail_on_missing_lora",
           "name": "fail_on_missing_lora",
           "type": "BOOLEAN",
+          "link": null,
           "widget": {
             "name": "fail_on_missing_lora"
-          },
+          }
+        },
+        {
+          "label": "regional_enabled",
+          "name": "regional_enabled",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "regional_enabled"
+          }
+        },
+        {
+          "label": "regional_mode",
+          "name": "regional_mode",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "regional_mode"
+          }
+        },
+        {
+          "label": "regional_split",
+          "name": "regional_split",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "regional_split"
+          }
+        },
+        {
+          "label": "regional_ratios",
+          "name": "regional_ratios",
+          "type": "STRING",
+          "link": null,
+          "widget": {
+            "name": "regional_ratios"
+          }
+        },
+        {
+          "label": "regional_base_enabled",
+          "name": "regional_base_enabled",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "regional_base_enabled"
+          }
+        },
+        {
+          "label": "regional_common_enabled",
+          "name": "regional_common_enabled",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "regional_common_enabled"
+          }
+        },
+        {
+          "label": "regional_base_ratio",
+          "name": "regional_base_ratio",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "regional_base_ratio"
+          }
+        },
+        {
+          "label": "regional_strength",
+          "name": "regional_strength",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "regional_strength"
+          }
+        },
+        {
+          "label": "regional_canvas_auto",
+          "name": "regional_canvas_auto",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "regional_canvas_auto"
+          }
+        },
+        {
+          "label": "regional_canvas_width",
+          "name": "regional_canvas_width",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "regional_canvas_width"
+          }
+        },
+        {
+          "label": "regional_canvas_height",
+          "name": "regional_canvas_height",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "regional_canvas_height"
+          }
+        },
+        {
+          "label": "module_table_enabled",
+          "name": "module_table_enabled",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "module_table_enabled"
+          }
+        },
+        {
+          "label": "module_mask_enabled",
+          "name": "module_mask_enabled",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "module_mask_enabled"
+          }
+        },
+        {
+          "label": "module_mask_strength",
+          "name": "module_mask_strength",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "module_mask_strength"
+          }
+        },
+        {
+          "label": "module_mask_set_area_to_bounds",
+          "name": "module_mask_set_area_to_bounds",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "module_mask_set_area_to_bounds"
+          }
+        },
+        {
+          "label": "module_negative_common_enabled",
+          "name": "module_negative_common_enabled",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "module_negative_common_enabled"
+          }
+        },
+        {
+          "label": "module_negative_common_prompt",
+          "name": "module_negative_common_prompt",
+          "type": "STRING",
+          "link": null,
+          "widget": {
+            "name": "module_negative_common_prompt"
+          }
+        },
+        {
+          "label": "module_flip_enabled",
+          "name": "module_flip_enabled",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "module_flip_enabled"
+          }
+        },
+        {
+          "label": "module_flip_axis",
+          "name": "module_flip_axis",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "module_flip_axis"
+          }
+        },
+        {
+          "label": "module_presets_enabled",
+          "name": "module_presets_enabled",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "module_presets_enabled"
+          }
+        },
+        {
+          "label": "module_adetailer_enabled",
+          "name": "module_adetailer_enabled",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "module_adetailer_enabled"
+          }
+        },
+        {
+          "label": "module_adetailer_model",
+          "name": "module_adetailer_model",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "module_adetailer_model"
+          }
+        },
+        {
+          "label": "module_adetailer_prompt",
+          "name": "module_adetailer_prompt",
+          "type": "STRING",
+          "link": null,
+          "widget": {
+            "name": "module_adetailer_prompt"
+          }
+        },
+        {
+          "label": "module_adetailer_negative_prompt",
+          "name": "module_adetailer_negative_prompt",
+          "type": "STRING",
+          "link": null,
+          "widget": {
+            "name": "module_adetailer_negative_prompt"
+          }
+        },
+        {
+          "label": "module_adetailer_confidence",
+          "name": "module_adetailer_confidence",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "module_adetailer_confidence"
+          }
+        },
+        {
+          "label": "module_adetailer_mask_blur",
+          "name": "module_adetailer_mask_blur",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "module_adetailer_mask_blur"
+          }
+        },
+        {
+          "label": "module_adetailer_denoise",
+          "name": "module_adetailer_denoise",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "module_adetailer_denoise"
+          }
+        },
+        {
+          "label": "module_adetailer_inpaint_only_masked",
+          "name": "module_adetailer_inpaint_only_masked",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "module_adetailer_inpaint_only_masked"
+          }
+        },
+        {
+          "label": "module_adetailer_cycles",
+          "name": "module_adetailer_cycles",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "module_adetailer_cycles"
+          }
+        },
+        {
+          "label": "module_controlnet_enabled",
+          "name": "module_controlnet_enabled",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "module_controlnet_enabled"
+          }
+        },
+        {
+          "label": "module_controlnet_preprocessor",
+          "name": "module_controlnet_preprocessor",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "module_controlnet_preprocessor"
+          }
+        },
+        {
+          "label": "module_controlnet_model",
+          "name": "module_controlnet_model",
+          "type": "STRING",
+          "link": null,
+          "widget": {
+            "name": "module_controlnet_model"
+          }
+        },
+        {
+          "label": "module_controlnet_weight",
+          "name": "module_controlnet_weight",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "module_controlnet_weight"
+          }
+        },
+        {
+          "label": "module_controlnet_start",
+          "name": "module_controlnet_start",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "module_controlnet_start"
+          }
+        },
+        {
+          "label": "module_controlnet_end",
+          "name": "module_controlnet_end",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "module_controlnet_end"
+          }
+        },
+        {
+          "label": "module_controlnet_resize_mode",
+          "name": "module_controlnet_resize_mode",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "module_controlnet_resize_mode"
+          }
+        },
+        {
+          "label": "module_controlnet_control_mode",
+          "name": "module_controlnet_control_mode",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "module_controlnet_control_mode"
+          }
+        },
+        {
+          "label": "module_controlnet_pixel_perfect",
+          "name": "module_controlnet_pixel_perfect",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "module_controlnet_pixel_perfect"
+          }
+        },
+        {
+          "label": "module_sam_enabled",
+          "name": "module_sam_enabled",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "module_sam_enabled"
+          }
+        },
+        {
+          "label": "module_sam_model",
+          "name": "module_sam_model",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "module_sam_model"
+          }
+        },
+        {
+          "label": "module_sam_prompt_mode",
+          "name": "module_sam_prompt_mode",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "module_sam_prompt_mode"
+          }
+        },
+        {
+          "label": "module_sam_confidence",
+          "name": "module_sam_confidence",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "module_sam_confidence"
+          }
+        },
+        {
+          "label": "module_sam_mask_blur",
+          "name": "module_sam_mask_blur",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "module_sam_mask_blur"
+          }
+        },
+        {
+          "label": "module_sam_dilate",
+          "name": "module_sam_dilate",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "module_sam_dilate"
+          }
+        },
+        {
+          "label": "module_sam_inpaint_denoise",
+          "name": "module_sam_inpaint_denoise",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "module_sam_inpaint_denoise"
+          }
+        },
+        {
+          "label": "module_sam_inpaint_area",
+          "name": "module_sam_inpaint_area",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "module_sam_inpaint_area"
+          }
+        },
+        {
+          "label": "module_sam_padding",
+          "name": "module_sam_padding",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "module_sam_padding"
+          }
+        },
+        {
+          "label": "module_upscale_enabled",
+          "name": "module_upscale_enabled",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "module_upscale_enabled"
+          }
+        },
+        {
+          "label": "module_upscale_mode",
+          "name": "module_upscale_mode",
+          "type": "COMBO",
+          "link": null,
+          "widget": {
+            "name": "module_upscale_mode"
+          }
+        },
+        {
+          "label": "module_upscale_by",
+          "name": "module_upscale_by",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "module_upscale_by"
+          }
+        },
+        {
+          "label": "module_upscale_upscaler",
+          "name": "module_upscale_upscaler",
+          "type": "STRING",
+          "link": null,
+          "widget": {
+            "name": "module_upscale_upscaler"
+          }
+        },
+        {
+          "label": "module_upscale_steps",
+          "name": "module_upscale_steps",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "module_upscale_steps"
+          }
+        },
+        {
+          "label": "module_upscale_denoise",
+          "name": "module_upscale_denoise",
+          "type": "FLOAT",
+          "link": null,
+          "widget": {
+            "name": "module_upscale_denoise"
+          }
+        },
+        {
+          "label": "module_upscale_tile_width",
+          "name": "module_upscale_tile_width",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "module_upscale_tile_width"
+          }
+        },
+        {
+          "label": "module_upscale_tile_height",
+          "name": "module_upscale_tile_height",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "module_upscale_tile_height"
+          }
+        },
+        {
+          "label": "module_upscale_overlap",
+          "name": "module_upscale_overlap",
+          "type": "INT",
+          "link": null,
+          "widget": {
+            "name": "module_upscale_overlap"
+          }
+        },
+        {
+          "label": "module_regional_lora_enabled",
+          "name": "module_regional_lora_enabled",
+          "type": "BOOLEAN",
+          "link": null,
+          "widget": {
+            "name": "module_regional_lora_enabled"
+          }
+        },
+        {
+          "label": "regional_mask",
+          "name": "regional_mask",
+          "type": "MASK",
           "link": null
         }
       ],
@@ -188,6 +707,13 @@
           "type": "STRING",
           "slot_index": 6,
           "links": []
+        },
+        {
+          "label": "module_config",
+          "name": "module_config",
+          "type": "STRING",
+          "slot_index": 7,
+          "links": []
         }
       ],
       "title": "WebUI Prompt Bridge - XL Img2Img Tutorial",
@@ -199,7 +725,63 @@
         "worst quality, low quality, lowres, blurry, bad anatomy, bad hands, extra fingers, watermark, text",
         1,
         true,
-        ""
+        false,
+        "matrix",
+        "vertical",
+        "1,1",
+        false,
+        false,
+        0.2,
+        1.0,
+        true,
+        1024,
+        1024,
+        false,
+        false,
+        1.0,
+        false,
+        false,
+        "",
+        false,
+        "auto",
+        false,
+        false,
+        "face_yolov8m.pt",
+        "detailed face, detailed eyes, detailed hands",
+        "bad anatomy, deformed, blurry, extra fingers",
+        0.3,
+        4,
+        0.4,
+        true,
+        1,
+        false,
+        "canny",
+        "",
+        1.0,
+        0.0,
+        1.0,
+        "just_resize",
+        "balanced",
+        true,
+        false,
+        "sam_vit_b",
+        "auto",
+        0.5,
+        4,
+        0,
+        0.45,
+        "only_masked",
+        32,
+        false,
+        "hires_fix",
+        2.0,
+        "Latent",
+        12,
+        0.35,
+        768,
+        768,
+        64,
+        false
       ],
       "color": "#2f3a4a",
       "bgcolor": "#1b222d"

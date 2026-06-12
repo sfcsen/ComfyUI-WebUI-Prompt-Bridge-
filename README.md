@@ -55,6 +55,8 @@
 - **LoRA 缺失提醒**：找不到 LoRA 时可以直接报错，避免你以为 LoRA 生效了但其实没用。
 - **LoRA 卡片管理**：读取本地 LoRA 预览图和 safetensors metadata，支持搜索、分类、整理状态、触发词和推荐权重。
 - **模型快速切换**：在 Bridge 面板里选择分体 Anima/Qwen 或任意整合 checkpoint，减少在复杂工作流里来回找节点。
+- **区域控制内置**：区域提示词、区域 conditioning、区域表格、负向 Common、区域翻转和区域 Preset 都在主节点里配置，不需要先额外添加一串模块节点。
+- **样式和布局内置**：尺寸快捷、布局预设和显示/隐藏设置默认放在主节点侧栏里；Styles 起手式可在设置里按需显示。
 - **生成前检查**：提交前检查空数字参数、Prompt/Negative 放反、悬空连接等常见问题，并尽量自动修复。
 - **WebUI 数据桥接**：可以复用本机 WebUI 扩展里的标签、收藏、翻译配置和样式。
 
@@ -214,6 +216,10 @@ https://registry.comfy.org/nodes/comfyui-webui-prompt-bridge
 
 如果你没有 WebUI，但想要更完整的 Prompt All in One / TagComplete 词库，可以在节点右侧点 `设置` -> `下载本地数据包`。节点会把配套数据下载到本插件自己的 `data` 目录，并自动切到可用的数据来源，不需要安装 A1111 或 Forge。
 
+默认情况下，Bridge 主节点只显示基础提示词操作、模型切换、尺寸快捷、布局预设和 LoRA 浏览区，侧栏会尽量保持清爽。Styles、区域控制、区域表格、负向 Common、区域翻转和区域 Preset 都是主节点内置能力，不需要额外添加模块节点；需要时可以在 `设置` 里打开显示。ADetailer、ControlNet、SAM、Ultimate SD Upscale 这类会涉及图片、Mask 或二次处理链路的功能仍作为高级扩展按需打开和下载。
+
+高级扩展模块打开显示后，侧栏里会出现 `一键构建...节点` 按钮。点击后会在 Bridge 主节点右侧自动创建对应外置节点，并连接 `module_config`、`positive`、`negative`、`model`、`clip` 等 Bridge 已知输出。图片、VAE、Mask、ControlNet 模型这类必须由工作流提供的输入，仍需要按当前工作流手动接上。
+
 如果你想要更接近 WebUI 的体验，可以连接你本机的 AUTOMATIC1111 WebUI 目录。推荐安装这两个 WebUI 扩展：
 
 - `sd-webui-prompt-all-in-one`
@@ -227,6 +233,8 @@ https://registry.comfy.org/nodes/comfyui-webui-prompt-bridge
 - `https://github.com/DominikDoom/a1111-sd-webui-tagcomplete`
 
 已存在的扩展会自动跳过，不会重复下载。安装到 WebUI 的 `extensions` 后，Bridge 会立即刷新可用词库；如果也想在 WebUI 页面里使用这些扩展，重启一次 WebUI。
+
+如果你想在 ComfyUI 里用上修脸、修手、局部重绘、ControlNet、SAM 或放大修复这些能力，也可以在 `设置` 里按卡片单独下载对应扩展：`Impact Pack`、`Impact Subpack`、`ControlNet Aux`、`SAM`、`Ultimate SD Upscale`。这些扩展也是按需下载，不会默认一次全装；装完后重启 ComfyUI，就能继续使用对应功能。`ADetailer` 主要用于脸部、手部和人物局部修复，属于常见的细节增强工具。
 
 ![One-click WebUI auto detection](docs/images/webui-one-click-auto-detect-success.png)
 

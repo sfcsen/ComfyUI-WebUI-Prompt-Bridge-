@@ -17,8 +17,10 @@ from pathlib import Path
 from urllib.parse import quote, unquote
 
 import comfy.sd
+import comfy.samplers
 import comfy.utils
 import folder_paths
+import torch
 import yaml
 
 
@@ -56,6 +58,43 @@ DEFAULT_BRIDGE_SETTINGS = {
     "layout_preset": "default",
     "tag_display": "local_first",
     "lora_card_size": "normal",
+    "ui_visibility": {},
+}
+UI_VISIBILITY_DEFAULTS = {
+    "top_tutorial": False,
+    "top_webui": True,
+    "top_lora": False,
+    "top_clip": False,
+    "top_fail_on_missing": False,
+    "model_switch": True,
+    "regional_control": False,
+    "size_controls": True,
+    "layout_presets": True,
+    "prompt_tools": True,
+    "styles": False,
+    "lora_browser": True,
+    "module_mask": False,
+    "module_table": False,
+    "module_negative_common": False,
+    "module_flip": False,
+    "module_presets": False,
+    "module_controlnet": False,
+    "module_adetailer": False,
+    "module_sam": False,
+    "module_upscale": False,
+    "module_regional_lora": False,
+}
+UI_VISIBILITY_LEGACY_KEYS = {
+    "assistant_mask": "module_mask",
+    "assistant_table": "module_table",
+    "assistant_negative_common": "module_negative_common",
+    "assistant_flip": "module_flip",
+    "assistant_presets": "module_presets",
+    "assistant_controlnet": "module_controlnet",
+    "assistant_adetailer": "module_adetailer",
+    "assistant_sam": "module_sam",
+    "assistant_upscale": "module_upscale",
+    "assistant_regional_lora": "module_regional_lora",
 }
 _SETTING_CHOICES = {
     "data_source": {"auto", "webui", "builtin"},
@@ -77,6 +116,43 @@ EXTENSION_ASSETS = {
         "directory": "a1111-sd-webui-tagcomplete",
         "repo_url": "https://github.com/DominikDoom/a1111-sd-webui-tagcomplete.git",
         "zip_url": "https://github.com/DominikDoom/a1111-sd-webui-tagcomplete/archive/refs/heads/main.zip",
+    },
+}
+MODULE_NODE_ASSETS = {
+    "impact_pack": {
+        "label": "ComfyUI Impact Pack",
+        "directory": "ComfyUI-Impact-Pack",
+        "repo_url": "https://github.com/ltdrdata/ComfyUI-Impact-Pack.git",
+        "zip_url": "https://github.com/ltdrdata/ComfyUI-Impact-Pack/archive/refs/heads/Main.zip",
+        "note": "Detailer/FaceDetailer 工作流常用节点包",
+    },
+    "impact_subpack": {
+        "label": "ComfyUI Impact Subpack",
+        "directory": "ComfyUI-Impact-Subpack",
+        "repo_url": "https://github.com/ltdrdata/ComfyUI-Impact-Subpack.git",
+        "zip_url": "https://github.com/ltdrdata/ComfyUI-Impact-Subpack/archive/refs/heads/main.zip",
+        "note": "Ultralytics detector / bbox / segm 支持",
+    },
+    "controlnet_aux": {
+        "label": "ControlNet Auxiliary Preprocessors",
+        "directory": "comfyui_controlnet_aux",
+        "repo_url": "https://github.com/Fannovel16/comfyui_controlnet_aux.git",
+        "zip_url": "https://github.com/Fannovel16/comfyui_controlnet_aux/archive/refs/heads/main.zip",
+        "note": "Canny/Depth/OpenPose/Lineart 等预处理器",
+    },
+    "segment_anything": {
+        "label": "ComfyUI Segment Anything",
+        "directory": "comfyui_segment_anything",
+        "repo_url": "https://github.com/storyicon/comfyui_segment_anything.git",
+        "zip_url": "https://github.com/storyicon/comfyui_segment_anything/archive/refs/heads/main.zip",
+        "note": "SAM 分割节点",
+    },
+    "ultimate_upscale": {
+        "label": "Ultimate SD Upscale",
+        "directory": "ComfyUI_UltimateSDUpscale",
+        "repo_url": "https://github.com/ssitu/ComfyUI_UltimateSDUpscale.git",
+        "zip_url": "https://github.com/ssitu/ComfyUI_UltimateSDUpscale/archive/refs/heads/master.zip",
+        "note": "Ultimate SD Upscale 节点",
     },
 }
 PROMPT_MARKET_SOURCES = {
@@ -341,12 +417,21 @@ LOCAL_CONFIG = _load_local_config()
 def _bridge_settings():
     raw = LOCAL_CONFIG.get("settings") if isinstance(LOCAL_CONFIG, dict) else {}
     settings = dict(DEFAULT_BRIDGE_SETTINGS)
+    settings["ui_visibility"] = dict(UI_VISIBILITY_DEFAULTS)
     if isinstance(raw, dict):
         for key, value in raw.items():
             if key not in settings:
                 continue
             if key == "show_startup_wizard":
                 settings[key] = bool(value)
+            elif key == "ui_visibility" and isinstance(value, dict):
+                visibility = dict(UI_VISIBILITY_DEFAULTS)
+                for visibility_key, default in UI_VISIBILITY_DEFAULTS.items():
+                    visibility[visibility_key] = bool(value.get(visibility_key, default))
+                for legacy_key, visibility_key in UI_VISIBILITY_LEGACY_KEYS.items():
+                    if legacy_key in value:
+                        visibility[visibility_key] = bool(value.get(legacy_key))
+                settings[key] = visibility
             elif key in _SETTING_CHOICES:
                 value = str(value or "").strip()
                 if value in _SETTING_CHOICES[key]:
@@ -2294,6 +2379,7 @@ def _settings_response():
         "config_path": _path_text(LOCAL_CONFIG_PATH),
         "webui_configured": bool(WEBUI_ROOT),
         "assets": _bridge_asset_status(),
+        "module_assets": _module_asset_status(),
     }
 
 
@@ -2437,6 +2523,14 @@ def _update_bridge_settings(data):
         value = data.get(key)
         if key == "show_startup_wizard":
             current[key] = bool(value)
+        elif key == "ui_visibility" and isinstance(value, dict):
+            visibility = {}
+            for visibility_key, default in UI_VISIBILITY_DEFAULTS.items():
+                visibility[visibility_key] = bool(value.get(visibility_key, current["ui_visibility"].get(visibility_key, default)))
+            for legacy_key, visibility_key in UI_VISIBILITY_LEGACY_KEYS.items():
+                if legacy_key in value:
+                    visibility[visibility_key] = bool(value.get(legacy_key))
+            current[key] = visibility
         elif key in _SETTING_CHOICES:
             value = str(value or "").strip()
             if value in _SETTING_CHOICES[key]:
@@ -2814,6 +2908,109 @@ def _bridge_asset_status(webui_root=None):
     return {"local": local, "webui": webui}
 
 
+def _safe_model_list(kind):
+    try:
+        return sorted(folder_paths.get_filename_list(kind), key=lambda item: str(item).casefold())
+    except Exception:
+        return []
+
+
+def _model_group_status(kind, aliases=()):
+    names = []
+    for model_kind in (kind, *aliases):
+        for name in _safe_model_list(model_kind):
+            if name not in names:
+                names.append(name)
+    try:
+        models_dir = Path(getattr(folder_paths, "models_dir", Path("models")))
+        for relative in (kind, *aliases):
+            root = models_dir / str(relative)
+            if not root.exists():
+                continue
+            for file in root.rglob("*"):
+                if not file.is_file():
+                    continue
+                if file.name.casefold().startswith("put_"):
+                    continue
+                rel = file.relative_to(root).as_posix()
+                if rel not in names:
+                    names.append(rel)
+    except Exception:
+        pass
+    names = [name for name in names if not Path(str(name)).name.casefold().startswith("put_")]
+    return {
+        "kind": kind,
+        "aliases": list(aliases),
+        "count": len(names),
+        "items": names[:200],
+        "truncated": len(names) > 200,
+    }
+
+
+def _custom_node_dir_status(name, patterns):
+    custom_nodes_dir = NODE_DIR.parent
+    matches = []
+    try:
+        for child in custom_nodes_dir.iterdir():
+            if not child.is_dir():
+                continue
+            child_key = child.name.casefold()
+            if any(pattern in child_key for pattern in patterns):
+                matches.append(_path_text(child))
+    except Exception:
+        matches = []
+    return {
+        "name": name,
+        "installed": bool(matches),
+        "paths": matches,
+    }
+
+
+def _module_asset_status():
+    node_packages = {
+        "impact_pack": _custom_node_dir_status("ComfyUI Impact Pack", ["impact-pack", "impact_pack", "impactpack"]),
+        "impact_subpack": _custom_node_dir_status("ComfyUI Impact Subpack", ["impact-subpack", "impact_subpack", "impactsubpack"]),
+        "controlnet_aux": _custom_node_dir_status("ControlNet Auxiliary Preprocessors", ["controlnet_aux", "controlnet-aux", "auxiliary"]),
+        "segment_anything": _custom_node_dir_status("Segment Anything / SAM", ["segment-anything", "segment_anything", "sam"]),
+        "ultimate_upscale": _custom_node_dir_status("Ultimate SD Upscale", ["ultimate", "upscale"]),
+    }
+    for key, package in node_packages.items():
+        spec = MODULE_NODE_ASSETS.get(key)
+        if spec:
+            package["install_label"] = spec["label"]
+            package["install_note"] = spec.get("note", "")
+            package["target"] = _path_text(NODE_DIR.parent / spec["directory"])
+    models = {
+        "controlnet": _model_group_status("controlnet"),
+        "upscale_models": _model_group_status("upscale_models"),
+        "sams": _model_group_status("sams", aliases=("sam", "SAM")),
+        "ultralytics": _model_group_status("ultralytics", aliases=("bbox", "segm")),
+    }
+    return {
+        "node_packages": node_packages,
+        "models": models,
+        "capabilities": {
+            "controlnet_apply": True,
+            "image_upscale": True,
+            "latent_upscale": True,
+            "inpaint_conditioning": True,
+            "adetailer_conditioning": True,
+            "auto_detection": (
+                (node_packages["impact_pack"]["installed"] and node_packages["impact_subpack"]["installed"])
+                or node_packages["segment_anything"]["installed"]
+            ),
+        },
+        "installable": {
+            key: {
+                "label": spec["label"],
+                "note": spec.get("note", ""),
+                "target": _path_text(NODE_DIR.parent / spec["directory"]),
+            }
+            for key, spec in MODULE_NODE_ASSETS.items()
+        },
+    }
+
+
 def _ensure_within_parent(path, parent):
     path = Path(path).resolve()
     parent = Path(parent).resolve()
@@ -2862,6 +3059,10 @@ def _download_asset_zip(spec, target, parent):
 
 def _install_extension_asset(key, parent):
     spec = EXTENSION_ASSETS[key]
+    return _install_asset_spec(key, spec, parent)
+
+
+def _install_asset_spec(key, spec, parent):
     target = _ensure_within_parent(_asset_target(parent, spec), parent)
     parent.mkdir(parents=True, exist_ok=True)
     if target.exists() and not _asset_exists(target):
@@ -2963,6 +3164,40 @@ def _install_extension_assets(data):
         "webui_root": _path_text(root),
         "results": results,
         **_settings_response(),
+    }
+
+
+def _install_module_node_assets(data):
+    requested = data.get("assets") or data.get("packages") or []
+    if isinstance(requested, str):
+        requested = [requested]
+    if not isinstance(requested, list):
+        requested = []
+    selected = [str(key).strip() for key in requested if str(key).strip() in MODULE_NODE_ASSETS]
+    if not selected:
+        return {
+            "ok": False,
+            "error": "请选择要下载的扩展；为了保持快速开始体验，不会默认安装全部扩展。",
+            "results": [],
+            "module_assets": _module_asset_status(),
+            "restart_required": False,
+        }
+    parent = NODE_DIR.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    results = []
+    for key in selected:
+        spec = MODULE_NODE_ASSETS[key]
+        result = _install_asset_spec(key, spec, parent)
+        result["id"] = key
+        result["label"] = spec["label"]
+        result["note"] = spec.get("note", "")
+        results.append(result)
+    ok = all(item.get("status") in {"exists", "installed"} for item in results)
+    return {
+        "ok": ok,
+        "results": results,
+        "module_assets": _module_asset_status(),
+        "restart_required": any(item.get("status") == "installed" for item in results),
     }
 
 
@@ -3104,6 +3339,92 @@ def _regional_prepare_negative_parts(text, region_count):
     return parts[:region_count]
 
 
+def _regional_join_prompt_parts(parts):
+    return " BREAK\n".join(part for part in parts if str(part or "").strip())
+
+
+def _regional_reverse_prompt_text(text, base_enabled=False, common_enabled=False):
+    parts, separators = _regional_split_prompt(text)
+    explicit_base = "ADDBASE" in separators
+    explicit_common = "ADDCOMM" in separators
+    offset = 0
+    if common_enabled or explicit_common:
+        offset += 1
+    if base_enabled or explicit_base:
+        offset += 1
+    if len(parts) <= offset + 1:
+        return text
+    return _regional_join_prompt_parts([*parts[:offset], *reversed(parts[offset:])])
+
+
+def _regional_reverse_ratios(ratios, split):
+    rows = _regional_parse_ratio_grid(ratios, split)
+    if split == "horizontal":
+        rows = list(reversed(rows))
+    else:
+        rows = [list(reversed(row)) for row in rows]
+    return ";".join(",".join(f"{value:g}" for value in row) for row in rows)
+
+
+def _merge_prompt_text(prefix, text):
+    prefix = str(prefix or "").strip()
+    text = str(text or "").strip()
+    if not prefix:
+        return text
+    if not text:
+        return prefix
+    return f"{prefix}, {text}"
+
+
+def _bounded_float(value, default, min_value=None, max_value=None):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = float(default)
+    if min_value is not None:
+        number = max(float(min_value), number)
+    if max_value is not None:
+        number = min(float(max_value), number)
+    return number
+
+
+def _bounded_int(value, default, min_value=None, max_value=None):
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = int(default)
+    if min_value is not None:
+        number = max(int(min_value), number)
+    if max_value is not None:
+        number = min(int(max_value), number)
+    return number
+
+
+def _apply_negative_common_prompt(negative_text, common_prompt):
+    common_prompt = str(common_prompt or "").strip()
+    if not common_prompt:
+        return negative_text
+    parts, _ = _regional_split_prompt(negative_text)
+    parts = [part for part in parts if part.strip()]
+    if not parts:
+        return common_prompt
+    return _regional_join_prompt_parts(_merge_prompt_text(common_prompt, part) for part in parts)
+
+
+def _conditioning_set_mask(conditioning, mask, strength=1.0, set_area_to_bounds=False):
+    if mask is None:
+        return conditioning
+    try:
+        strength = max(0.0, float(strength))
+    except (TypeError, ValueError):
+        strength = 1.0
+    return _conditioning_set_values(conditioning, {
+        "mask": mask,
+        "set_area_to_bounds": bool(set_area_to_bounds),
+        "mask_strength": strength,
+    })
+
+
 def _conditioning_set_values(conditioning, values):
     result = []
     for item in conditioning:
@@ -3171,9 +3492,22 @@ def _build_regional_conditioning(clip, positive_text, negative_text, split, rati
 
 class WebUIPromptBridge:
     CATEGORY = "conditioning/webui"
+    SEARCH_ALIASES = [
+        "webui",
+        "webui prompt",
+        "webui prompt bridge",
+        "prompt bridge",
+        "bridge prompt",
+        "a1111 prompt",
+        "forge prompt",
+        "lora browser",
+        "regional prompt",
+        "区域提示词",
+        "提示词桥接",
+    ]
     FUNCTION = "build"
-    RETURN_TYPES = ("MODEL", "CLIP", "CONDITIONING", "CONDITIONING", "STRING", "STRING", "STRING")
-    RETURN_NAMES = ("model", "clip", "positive", "negative", "positive_text", "negative_text", "lora_info")
+    RETURN_TYPES = ("MODEL", "CLIP", "CONDITIONING", "CONDITIONING", "STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("model", "clip", "positive", "negative", "positive_text", "negative_text", "lora_info", "module_config")
 
     def __init__(self):
         self.loaded_loras = {}
@@ -3211,6 +3545,71 @@ class WebUIPromptBridge:
                 "regional_canvas_auto": ("BOOLEAN", {"default": True}),
                 "regional_canvas_width": ("INT", {"default": 1024, "min": 64, "max": 16384, "step": 8}),
                 "regional_canvas_height": ("INT", {"default": 1024, "min": 64, "max": 16384, "step": 8}),
+                "module_table_enabled": ("BOOLEAN", {"default": False}),
+                "module_mask_enabled": ("BOOLEAN", {"default": False}),
+                "module_mask_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 10.0, "step": 0.05}),
+                "module_mask_set_area_to_bounds": ("BOOLEAN", {"default": False}),
+                "module_negative_common_enabled": ("BOOLEAN", {"default": False}),
+                "module_negative_common_prompt": ("STRING", {"default": "", "multiline": True}),
+                "module_flip_enabled": ("BOOLEAN", {"default": False}),
+                "module_flip_axis": (["auto", "horizontal", "vertical"], {"default": "auto"}),
+                "module_presets_enabled": ("BOOLEAN", {"default": False}),
+                "module_adetailer_enabled": ("BOOLEAN", {"default": False}),
+                "module_adetailer_model": (
+                    [
+                        "face_yolov8m.pt",
+                        "face_yolov8n.pt",
+                        "face_yolov8s.pt",
+                        "hand_yolov8s.pt",
+                        "hand_yolov8n.pt",
+                        "person_yolov8m-seg.pt",
+                        "person_yolov8n-seg.pt",
+                        "mediapipe_face_full",
+                        "custom",
+                    ],
+                    {"default": "face_yolov8m.pt"},
+                ),
+                "module_adetailer_prompt": ("STRING", {"default": "detailed face, detailed eyes, detailed hands", "multiline": True}),
+                "module_adetailer_negative_prompt": ("STRING", {"default": "bad anatomy, deformed, blurry, extra fingers", "multiline": True}),
+                "module_adetailer_confidence": ("FLOAT", {"default": 0.30, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "module_adetailer_mask_blur": ("INT", {"default": 4, "min": 0, "max": 64, "step": 1}),
+                "module_adetailer_denoise": ("FLOAT", {"default": 0.40, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "module_adetailer_inpaint_only_masked": ("BOOLEAN", {"default": True}),
+                "module_adetailer_cycles": ("INT", {"default": 1, "min": 1, "max": 8, "step": 1}),
+                "module_controlnet_enabled": ("BOOLEAN", {"default": False}),
+                "module_controlnet_preprocessor": (
+                    ["none", "canny", "depth", "openpose", "lineart", "softedge", "normal", "tile", "reference", "ip-adapter"],
+                    {"default": "canny"},
+                ),
+                "module_controlnet_model": ("STRING", {"default": "", "multiline": False}),
+                "module_controlnet_weight": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}),
+                "module_controlnet_start": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "module_controlnet_end": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "module_controlnet_resize_mode": (["just_resize", "crop_and_resize", "resize_and_fill"], {"default": "just_resize"}),
+                "module_controlnet_control_mode": (["balanced", "prompt", "control"], {"default": "balanced"}),
+                "module_controlnet_pixel_perfect": ("BOOLEAN", {"default": True}),
+                "module_sam_enabled": ("BOOLEAN", {"default": False}),
+                "module_sam_model": (["sam_vit_b", "sam_vit_l", "sam_vit_h", "sam_hq_vit_h", "mobile_sam", "custom"], {"default": "sam_vit_b"}),
+                "module_sam_prompt_mode": (["auto", "point", "box", "mask"], {"default": "auto"}),
+                "module_sam_confidence": ("FLOAT", {"default": 0.50, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "module_sam_mask_blur": ("INT", {"default": 4, "min": 0, "max": 64, "step": 1}),
+                "module_sam_dilate": ("INT", {"default": 0, "min": -64, "max": 64, "step": 1}),
+                "module_sam_inpaint_denoise": ("FLOAT", {"default": 0.45, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "module_sam_inpaint_area": (["whole_picture", "only_masked"], {"default": "only_masked"}),
+                "module_sam_padding": ("INT", {"default": 32, "min": 0, "max": 512, "step": 8}),
+                "module_upscale_enabled": ("BOOLEAN", {"default": False}),
+                "module_upscale_mode": (["hires_fix", "ultimate_sd_upscale", "latent_upscale", "tile"], {"default": "hires_fix"}),
+                "module_upscale_by": ("FLOAT", {"default": 2.0, "min": 1.0, "max": 8.0, "step": 0.05}),
+                "module_upscale_upscaler": ("STRING", {"default": "Latent", "multiline": False}),
+                "module_upscale_steps": ("INT", {"default": 12, "min": 0, "max": 150, "step": 1}),
+                "module_upscale_denoise": ("FLOAT", {"default": 0.35, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "module_upscale_tile_width": ("INT", {"default": 768, "min": 128, "max": 4096, "step": 8}),
+                "module_upscale_tile_height": ("INT", {"default": 768, "min": 128, "max": 4096, "step": 8}),
+                "module_upscale_overlap": ("INT", {"default": 64, "min": 0, "max": 1024, "step": 8}),
+                "module_regional_lora_enabled": ("BOOLEAN", {"default": False}),
+            },
+            "optional": {
+                "regional_mask": ("MASK",),
             },
             "hidden": {
                 "prompt": "PROMPT",
@@ -3245,6 +3644,53 @@ class WebUIPromptBridge:
         regional_canvas_auto=True,
         regional_canvas_width=1024,
         regional_canvas_height=1024,
+        module_table_enabled=False,
+        module_mask_enabled=False,
+        module_mask_strength=1.0,
+        module_mask_set_area_to_bounds=False,
+        module_negative_common_enabled=False,
+        module_negative_common_prompt="",
+        module_flip_enabled=False,
+        module_flip_axis="auto",
+        module_presets_enabled=False,
+        module_adetailer_enabled=False,
+        module_adetailer_model="face_yolov8m.pt",
+        module_adetailer_prompt="detailed face, detailed eyes, detailed hands",
+        module_adetailer_negative_prompt="bad anatomy, deformed, blurry, extra fingers",
+        module_adetailer_confidence=0.30,
+        module_adetailer_mask_blur=4,
+        module_adetailer_denoise=0.40,
+        module_adetailer_inpaint_only_masked=True,
+        module_adetailer_cycles=1,
+        module_controlnet_enabled=False,
+        module_controlnet_preprocessor="canny",
+        module_controlnet_model="",
+        module_controlnet_weight=1.0,
+        module_controlnet_start=0.0,
+        module_controlnet_end=1.0,
+        module_controlnet_resize_mode="just_resize",
+        module_controlnet_control_mode="balanced",
+        module_controlnet_pixel_perfect=True,
+        module_sam_enabled=False,
+        module_sam_model="sam_vit_b",
+        module_sam_prompt_mode="auto",
+        module_sam_confidence=0.50,
+        module_sam_mask_blur=4,
+        module_sam_dilate=0,
+        module_sam_inpaint_denoise=0.45,
+        module_sam_inpaint_area="only_masked",
+        module_sam_padding=32,
+        module_upscale_enabled=False,
+        module_upscale_mode="hires_fix",
+        module_upscale_by=2.0,
+        module_upscale_upscaler="Latent",
+        module_upscale_steps=12,
+        module_upscale_denoise=0.35,
+        module_upscale_tile_width=768,
+        module_upscale_tile_height=768,
+        module_upscale_overlap=64,
+        module_regional_lora_enabled=False,
+        regional_mask=None,
         prompt=None,
         unique_id=None,
     ):
@@ -3285,6 +3731,141 @@ class WebUIPromptBridge:
         if missing and fail_on_missing_lora:
             raise ValueError("Missing LoRA(s): " + ", ".join(missing))
 
+        module_config = {
+            "version": 1,
+            "regional": {
+                "enabled": bool(regional_enabled),
+                "mode": regional_mode,
+                "split": regional_split,
+                "ratios": str(regional_ratios or ""),
+                "base_enabled": bool(regional_base_enabled),
+                "common_enabled": bool(regional_common_enabled),
+                "base_ratio": _bounded_float(regional_base_ratio, 0.2, 0.0, 1.0),
+                "strength": _bounded_float(regional_strength, 1.0, 0.0, 10.0),
+                "canvas": {
+                    "auto": bool(regional_canvas_auto),
+                    "width": _bounded_int(regional_canvas_width, 1024, 64, 16384),
+                    "height": _bounded_int(regional_canvas_height, 1024, 64, 16384),
+                },
+            },
+            "modules": {
+                "table": {"enabled": bool(module_table_enabled)},
+                "mask": {
+                    "enabled": bool(module_mask_enabled),
+                    "has_mask_input": regional_mask is not None,
+                    "strength": _bounded_float(module_mask_strength, 1.0, 0.0, 10.0),
+                    "set_area_to_bounds": bool(module_mask_set_area_to_bounds),
+                },
+                "negative_common": {
+                    "enabled": bool(module_negative_common_enabled),
+                    "prompt": str(module_negative_common_prompt or "").strip(),
+                },
+                "flip": {
+                    "enabled": bool(module_flip_enabled),
+                    "axis": module_flip_axis if module_flip_axis in {"auto", "horizontal", "vertical"} else "auto",
+                },
+                "presets": {"enabled": bool(module_presets_enabled)},
+                "adetailer": {
+                    "enabled": bool(module_adetailer_enabled),
+                    "model": str(module_adetailer_model or "face_yolov8m.pt"),
+                    "prompt": str(module_adetailer_prompt or "").strip(),
+                    "negative_prompt": str(module_adetailer_negative_prompt or "").strip(),
+                    "confidence": _bounded_float(module_adetailer_confidence, 0.30, 0.0, 1.0),
+                    "mask_blur": _bounded_int(module_adetailer_mask_blur, 4, 0, 64),
+                    "denoise": _bounded_float(module_adetailer_denoise, 0.40, 0.0, 1.0),
+                    "inpaint_only_masked": bool(module_adetailer_inpaint_only_masked),
+                    "cycles": _bounded_int(module_adetailer_cycles, 1, 1, 8),
+                },
+                "controlnet": {
+                    "enabled": bool(module_controlnet_enabled),
+                    "preprocessor": str(module_controlnet_preprocessor or "canny"),
+                    "model": str(module_controlnet_model or "").strip(),
+                    "weight": _bounded_float(module_controlnet_weight, 1.0, 0.0, 2.0),
+                    "start": _bounded_float(module_controlnet_start, 0.0, 0.0, 1.0),
+                    "end": _bounded_float(module_controlnet_end, 1.0, 0.0, 1.0),
+                    "resize_mode": str(module_controlnet_resize_mode or "just_resize"),
+                    "control_mode": str(module_controlnet_control_mode or "balanced"),
+                    "pixel_perfect": bool(module_controlnet_pixel_perfect),
+                },
+                "sam_inpaint": {
+                    "enabled": bool(module_sam_enabled),
+                    "model": str(module_sam_model or "sam_vit_b"),
+                    "prompt_mode": str(module_sam_prompt_mode or "auto"),
+                    "confidence": _bounded_float(module_sam_confidence, 0.50, 0.0, 1.0),
+                    "mask_blur": _bounded_int(module_sam_mask_blur, 4, 0, 64),
+                    "dilate": _bounded_int(module_sam_dilate, 0, -64, 64),
+                    "inpaint_denoise": _bounded_float(module_sam_inpaint_denoise, 0.45, 0.0, 1.0),
+                    "inpaint_area": str(module_sam_inpaint_area or "only_masked"),
+                    "padding": _bounded_int(module_sam_padding, 32, 0, 512),
+                },
+                "upscale": {
+                    "enabled": bool(module_upscale_enabled),
+                    "mode": str(module_upscale_mode or "hires_fix"),
+                    "scale_by": _bounded_float(module_upscale_by, 2.0, 1.0, 8.0),
+                    "upscaler": str(module_upscale_upscaler or "Latent"),
+                    "steps": _bounded_int(module_upscale_steps, 12, 0, 150),
+                    "denoise": _bounded_float(module_upscale_denoise, 0.35, 0.0, 1.0),
+                    "tile_width": _bounded_int(module_upscale_tile_width, 768, 128, 4096),
+                    "tile_height": _bounded_int(module_upscale_tile_height, 768, 128, 4096),
+                    "overlap": _bounded_int(module_upscale_overlap, 64, 0, 1024),
+                },
+                "regional_lora": {"enabled": bool(module_regional_lora_enabled)},
+            },
+        }
+        if module_config["modules"]["controlnet"]["end"] < module_config["modules"]["controlnet"]["start"]:
+            module_config["modules"]["controlnet"]["start"], module_config["modules"]["controlnet"]["end"] = (
+                module_config["modules"]["controlnet"]["end"],
+                module_config["modules"]["controlnet"]["start"],
+            )
+
+        module_info = []
+        if module_negative_common_enabled and str(module_negative_common_prompt or "").strip():
+            negative_text = _apply_negative_common_prompt(negative_text, module_negative_common_prompt)
+            module_info.append("Negative Common=on")
+        if module_table_enabled:
+            module_info.append("Region Table=on")
+        if module_presets_enabled:
+            module_info.append("Region Presets=on")
+
+        if module_adetailer_enabled:
+            try:
+                ad_confidence = min(1.0, max(0.0, float(module_adetailer_confidence)))
+            except (TypeError, ValueError):
+                ad_confidence = 0.30
+            try:
+                ad_denoise = min(1.0, max(0.0, float(module_adetailer_denoise)))
+            except (TypeError, ValueError):
+                ad_denoise = 0.40
+            try:
+                ad_mask_blur = max(0, int(module_adetailer_mask_blur))
+            except (TypeError, ValueError):
+                ad_mask_blur = 4
+            try:
+                ad_cycles = min(8, max(1, int(module_adetailer_cycles)))
+            except (TypeError, ValueError):
+                ad_cycles = 1
+            ad_prompt = str(module_adetailer_prompt or "").strip() or "inherit positive prompt"
+            ad_negative = str(module_adetailer_negative_prompt or "").strip() or "inherit negative prompt"
+            module_info.append(
+                "ADetailer module=on "
+                f"model={module_adetailer_model} confidence={ad_confidence:g} denoise={ad_denoise:g} "
+                f"mask_blur={ad_mask_blur} cycles={ad_cycles} only_masked={'on' if module_adetailer_inpaint_only_masked else 'off'} "
+                f"prompt={ad_prompt[:80]} negative={ad_negative[:80]}"
+            )
+
+        if module_flip_enabled:
+            flip_split = regional_split
+            if module_flip_axis == "horizontal":
+                flip_split = "horizontal"
+            elif module_flip_axis == "vertical":
+                flip_split = "vertical"
+            positive_text = _regional_reverse_prompt_text(positive_text, regional_base_enabled, regional_common_enabled)
+            negative_text = _regional_reverse_prompt_text(negative_text)
+            regional_ratios = _regional_reverse_ratios(regional_ratios, flip_split)
+            module_config["regional"]["ratios"] = regional_ratios
+            module_config["regional"]["split"] = flip_split
+            module_info.append(f"Regional Flip={flip_split}")
+
         regional_info = None
         if regional_enabled:
             if regional_mode != "matrix":
@@ -3311,7 +3892,115 @@ class WebUIPromptBridge:
         else:
             positive = clip.encode_from_tokens_scheduled(clip.tokenize(positive_text))
             negative = clip.encode_from_tokens_scheduled(clip.tokenize(negative_text))
+
+        if module_mask_enabled:
+            if regional_mask is not None:
+                positive = _conditioning_set_mask(positive, regional_mask, module_mask_strength, module_mask_set_area_to_bounds)
+                module_info.append("Mask conditioning=on")
+            else:
+                module_info.append("Mask conditioning=missing MASK input")
+
+        if module_controlnet_enabled:
+            try:
+                controlnet_weight = float(module_controlnet_weight)
+            except (TypeError, ValueError):
+                controlnet_weight = 1.0
+            try:
+                controlnet_start = min(1.0, max(0.0, float(module_controlnet_start)))
+            except (TypeError, ValueError):
+                controlnet_start = 0.0
+            try:
+                controlnet_end = min(1.0, max(0.0, float(module_controlnet_end)))
+            except (TypeError, ValueError):
+                controlnet_end = 1.0
+            if controlnet_end < controlnet_start:
+                controlnet_start, controlnet_end = controlnet_end, controlnet_start
+            controlnet_model = str(module_controlnet_model or "").strip() or "auto"
+            module_info.append(
+                "ControlNet module=on "
+                f"preprocessor={module_controlnet_preprocessor} model={controlnet_model[:80]} "
+                f"weight={controlnet_weight:g} range={controlnet_start:g}-{controlnet_end:g} "
+                f"resize={module_controlnet_resize_mode} mode={module_controlnet_control_mode} "
+                f"pixel_perfect={'on' if module_controlnet_pixel_perfect else 'off'}"
+            )
+        if module_sam_enabled:
+            try:
+                sam_confidence = min(1.0, max(0.0, float(module_sam_confidence)))
+            except (TypeError, ValueError):
+                sam_confidence = 0.50
+            try:
+                sam_mask_blur = max(0, int(module_sam_mask_blur))
+            except (TypeError, ValueError):
+                sam_mask_blur = 4
+            try:
+                sam_dilate = max(-64, min(64, int(module_sam_dilate)))
+            except (TypeError, ValueError):
+                sam_dilate = 0
+            try:
+                sam_denoise = min(1.0, max(0.0, float(module_sam_inpaint_denoise)))
+            except (TypeError, ValueError):
+                sam_denoise = 0.45
+            try:
+                sam_padding = max(0, int(module_sam_padding))
+            except (TypeError, ValueError):
+                sam_padding = 32
+            module_info.append(
+                "SAM/Inpaint module=on "
+                f"model={module_sam_model} prompt_mode={module_sam_prompt_mode} confidence={sam_confidence:g} "
+                f"mask_blur={sam_mask_blur} dilate={sam_dilate} denoise={sam_denoise:g} "
+                f"area={module_sam_inpaint_area} padding={sam_padding}"
+            )
+        if module_upscale_enabled:
+            try:
+                upscale_by = max(1.0, float(module_upscale_by))
+            except (TypeError, ValueError):
+                upscale_by = 2.0
+            try:
+                upscale_steps = max(0, int(module_upscale_steps))
+            except (TypeError, ValueError):
+                upscale_steps = 12
+            try:
+                upscale_denoise = min(1.0, max(0.0, float(module_upscale_denoise)))
+            except (TypeError, ValueError):
+                upscale_denoise = 0.35
+            try:
+                tile_width = max(128, int(module_upscale_tile_width))
+            except (TypeError, ValueError):
+                tile_width = 768
+            try:
+                tile_height = max(128, int(module_upscale_tile_height))
+            except (TypeError, ValueError):
+                tile_height = 768
+            try:
+                tile_overlap = max(0, int(module_upscale_overlap))
+            except (TypeError, ValueError):
+                tile_overlap = 64
+            module_info.append(
+                "Upscale module=on "
+                f"mode={module_upscale_mode} by={upscale_by:g} upscaler={str(module_upscale_upscaler or 'Latent')[:80]} "
+                f"steps={upscale_steps} denoise={upscale_denoise:g} tile={tile_width}x{tile_height} overlap={tile_overlap}"
+            )
+        if module_regional_lora_enabled:
+            regional_lora_count = len(_parse_lora_tags(positive_text)[1])
+            module_info.append(f"Regional LoRA audit=on detected={regional_lora_count} global LoRA(s)")
+        module_config["prompts"] = {
+            "positive": positive_text,
+            "negative": negative_text,
+        }
+        module_config["loras"] = {
+            "applied": applied,
+            "skipped_upstream": skipped_upstream,
+            "missing": missing,
+        }
+        if regional_info:
+            module_config["regional"]["result"] = {
+                key: value
+                for key, value in regional_info.items()
+                if key not in {"positive", "negative"}
+            }
         info = "Applied LoRAs: " + (", ".join(applied) if applied else "None")
+        if module_info:
+            info += " | Modules: " + "; ".join(module_info)
         if regional_enabled:
             if regional_info and "positive" in regional_info:
                 info += (
@@ -3334,15 +4023,578 @@ class WebUIPromptBridge:
             info += " | Missing LoRAs: " + ", ".join(missing)
             print("[WebUIPromptBridge] Missing LoRAs: " + ", ".join(missing))
 
-        return (model, clip, positive, negative, positive_text, negative_text, info)
+        module_config_text = json.dumps(module_config, ensure_ascii=False, separators=(",", ":"))
+        return (model, clip, positive, negative, positive_text, negative_text, info, module_config_text)
+
+
+def _read_module_config_section(module_config, section):
+    try:
+        data = json.loads(module_config or "{}")
+    except (TypeError, ValueError, json.JSONDecodeError):
+        data = {}
+    modules = data.get("modules") if isinstance(data, dict) else {}
+    value = modules.get(section) if isinstance(modules, dict) else {}
+    if not isinstance(value, dict):
+        value = {}
+    enabled = bool(value.get("enabled", False))
+    return value, enabled
+
+
+def _empty_mask_for_image(image):
+    try:
+        return torch.zeros((image.shape[0], image.shape[1], image.shape[2]), dtype=image.dtype, device=image.device)
+    except Exception:
+        return torch.zeros((1, 64, 64))
+
+
+def _get_registered_node_class(class_name):
+    try:
+        import importlib
+
+        comfy_nodes = importlib.import_module("nodes")
+        mappings = getattr(comfy_nodes, "NODE_CLASS_MAPPINGS", {})
+        node_class = mappings.get(class_name)
+        if node_class is not None:
+            return node_class
+    except Exception:
+        pass
+    return None
+
+
+def _adetailer_model_to_ultralytics_name(model_name):
+    model_name = str(model_name or "").strip()
+    if not model_name or model_name in {"custom", "mediapipe_face_full"}:
+        return ""
+    normalized = model_name.replace("\\", "/")
+    if normalized.startswith(("bbox/", "segm/")):
+        return normalized
+    lowered = normalized.casefold()
+    if "-seg" in lowered or lowered.startswith("person_") or lowered.startswith("segm_"):
+        return f"segm/{normalized}"
+    return f"bbox/{normalized}"
+
+
+def _is_real_segm_detector(detector):
+    if detector is None:
+        return False
+    name = detector.__class__.__name__.casefold()
+    return "no_segm" not in name and "dummy" not in name
+
+
+def _load_impact_ultralytics_detector(model_name):
+    model_name = _adetailer_model_to_ultralytics_name(model_name)
+    if not model_name:
+        return None, None, "未指定可自动加载的 Ultralytics 模型"
+    provider_class = _get_registered_node_class("UltralyticsDetectorProvider")
+    if provider_class is None:
+        raise ValueError("找不到 UltralyticsDetectorProvider。请确认 ComfyUI-Impact-Subpack 已安装并重启 ComfyUI。")
+    bbox_detector, segm_detector = provider_class().doit(model_name)
+    return bbox_detector, segm_detector, model_name
+
+
+class _WebUIPromptBridgeModuleConfigBase:
+    CATEGORY = "conditioning/webui/modules"
+    SEARCH_ALIASES = ["webui bridge", "prompt bridge module", "webui module"]
+    FUNCTION = "extract"
+    RETURN_TYPES = ("STRING", "BOOLEAN")
+    RETURN_NAMES = ("config_json", "enabled")
+    MODULE_KEY = ""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "module_config": ("STRING", {"default": "", "multiline": True}),
+            },
+        }
+
+    def extract(self, module_config):
+        config, enabled = _read_module_config_section(module_config, self.MODULE_KEY)
+        return (json.dumps(config, ensure_ascii=False, indent=2), enabled)
+
+
+class WebUIPromptBridgeADetailerConfig(_WebUIPromptBridgeModuleConfigBase):
+    MODULE_KEY = "adetailer"
+
+
+class WebUIPromptBridgeControlNetConfig(_WebUIPromptBridgeModuleConfigBase):
+    MODULE_KEY = "controlnet"
+
+
+class WebUIPromptBridgeSAMInpaintConfig(_WebUIPromptBridgeModuleConfigBase):
+    MODULE_KEY = "sam_inpaint"
+
+
+class WebUIPromptBridgeUpscaleConfig(_WebUIPromptBridgeModuleConfigBase):
+    MODULE_KEY = "upscale"
+
+
+class WebUIPromptBridgeControlNetApply:
+    CATEGORY = "conditioning/webui/modules"
+    FUNCTION = "apply"
+    RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "STRING")
+    RETURN_NAMES = ("positive", "negative", "status")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "positive": ("CONDITIONING",),
+                "negative": ("CONDITIONING",),
+                "control_net": ("CONTROL_NET",),
+                "image": ("IMAGE",),
+                "module_config": ("STRING", {"default": "", "multiline": True}),
+            },
+            "optional": {
+                "vae": ("VAE",),
+            },
+        }
+
+    def apply(self, positive, negative, control_net, image, module_config, vae=None):
+        config, enabled = _read_module_config_section(module_config, "controlnet")
+        if not enabled:
+            return (positive, negative, "ControlNet module disabled")
+        strength = _bounded_float(config.get("weight"), 1.0, 0.0, 10.0)
+        if strength == 0:
+            return (positive, negative, "ControlNet weight is 0; conditioning unchanged")
+        start = _bounded_float(config.get("start"), 0.0, 0.0, 1.0)
+        end = _bounded_float(config.get("end"), 1.0, 0.0, 1.0)
+        if end < start:
+            start, end = end, start
+
+        control_hint = image.movedim(-1, 1)
+        cnets = {}
+        out = []
+        for conditioning in [positive, negative]:
+            current = []
+            for item in conditioning:
+                metadata = item[1].copy()
+                previous = metadata.get("control", None)
+                if previous in cnets:
+                    c_net = cnets[previous]
+                else:
+                    c_net = control_net.copy().set_cond_hint(control_hint, strength, (start, end), vae=vae)
+                    c_net.set_previous_controlnet(previous)
+                    cnets[previous] = c_net
+                metadata["control"] = c_net
+                metadata["control_apply_to_uncond"] = False
+                current.append([item[0], metadata])
+            out.append(current)
+        status = (
+            f"ControlNet applied: preprocessor={config.get('preprocessor', 'none')} "
+            f"model={config.get('model') or 'connected'} weight={strength:g} range={start:g}-{end:g}"
+        )
+        return (out[0], out[1], status)
+
+
+class WebUIPromptBridgeImageUpscale:
+    CATEGORY = "conditioning/webui/modules"
+    FUNCTION = "upscale"
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("image", "status")
+    UPSCALE_METHODS = ["nearest-exact", "bilinear", "area", "bicubic", "lanczos"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "module_config": ("STRING", {"default": "", "multiline": True}),
+                "fallback_method": (cls.UPSCALE_METHODS, {"default": "lanczos"}),
+            },
+        }
+
+    def upscale(self, image, module_config, fallback_method="lanczos"):
+        config, enabled = _read_module_config_section(module_config, "upscale")
+        if not enabled:
+            return (image, "Upscale module disabled")
+        scale_by = _bounded_float(config.get("scale_by"), 2.0, 0.01, 8.0)
+        method = str(config.get("upscaler") or fallback_method).strip().lower()
+        method_aliases = {
+            "latent": fallback_method,
+            "none": fallback_method,
+            "4x-ultrasharp": "lanczos",
+            "realesrgan": "lanczos",
+            "r-esrgan": "lanczos",
+        }
+        method = method_aliases.get(method, method)
+        if method not in self.UPSCALE_METHODS:
+            method = fallback_method if fallback_method in self.UPSCALE_METHODS else "lanczos"
+        samples = image.movedim(-1, 1)
+        width = max(1, round(samples.shape[3] * scale_by))
+        height = max(1, round(samples.shape[2] * scale_by))
+        scaled = comfy.utils.common_upscale(samples, width, height, method, "disabled").movedim(1, -1)
+        return (scaled, f"Image upscaled by {scale_by:g} using {method}: {width}x{height}")
+
+
+class WebUIPromptBridgeLatentUpscale:
+    CATEGORY = "conditioning/webui/modules"
+    FUNCTION = "upscale"
+    RETURN_TYPES = ("LATENT", "STRING")
+    RETURN_NAMES = ("latent", "status")
+    UPSCALE_METHODS = ["nearest-exact", "bilinear", "area", "bicubic", "bislerp"]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "samples": ("LATENT",),
+                "module_config": ("STRING", {"default": "", "multiline": True}),
+                "fallback_method": (cls.UPSCALE_METHODS, {"default": "bislerp"}),
+            },
+        }
+
+    def upscale(self, samples, module_config, fallback_method="bislerp"):
+        config, enabled = _read_module_config_section(module_config, "upscale")
+        if not enabled:
+            return (samples, "Upscale module disabled")
+        scale_by = _bounded_float(config.get("scale_by"), 2.0, 0.01, 8.0)
+        method = str(config.get("upscaler") or fallback_method).strip().lower()
+        if method == "latent":
+            method = fallback_method
+        if method not in self.UPSCALE_METHODS:
+            method = fallback_method if fallback_method in self.UPSCALE_METHODS else "bislerp"
+        result = samples.copy()
+        width = max(1, round(samples["samples"].shape[-1] * scale_by))
+        height = max(1, round(samples["samples"].shape[-2] * scale_by))
+        result["samples"] = comfy.utils.common_upscale(samples["samples"], width, height, method, "disabled")
+        return (result, f"Latent upscaled by {scale_by:g} using {method}: {width * 8}x{height * 8}")
+
+
+class WebUIPromptBridgeSetLatentMask:
+    CATEGORY = "conditioning/webui/modules"
+    FUNCTION = "set_mask"
+    RETURN_TYPES = ("LATENT", "STRING")
+    RETURN_NAMES = ("latent", "status")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "samples": ("LATENT",),
+                "mask": ("MASK",),
+                "module_config": ("STRING", {"default": "", "multiline": True}),
+            },
+        }
+
+    def set_mask(self, samples, mask, module_config):
+        mask_config, mask_enabled = _read_module_config_section(module_config, "mask")
+        sam_config, sam_enabled = _read_module_config_section(module_config, "sam_inpaint")
+        if not mask_enabled and not sam_enabled:
+            return (samples, "Mask and SAM/Inpaint modules disabled")
+        result = samples.copy()
+        result["noise_mask"] = mask.reshape((-1, 1, mask.shape[-2], mask.shape[-1]))
+        source = "SAM/Inpaint" if sam_enabled else "Mask"
+        denoise = sam_config.get("inpaint_denoise", "n/a") if sam_enabled else mask_config.get("strength", "n/a")
+        return (result, f"{source} mask applied to latent; denoise/strength={denoise}")
+
+
+class WebUIPromptBridgeADetailerConditioning:
+    CATEGORY = "conditioning/webui/modules"
+    FUNCTION = "encode"
+    RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "STRING")
+    RETURN_NAMES = ("positive", "negative", "status")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "clip": ("CLIP",),
+                "positive": ("CONDITIONING",),
+                "negative": ("CONDITIONING",),
+                "module_config": ("STRING", {"default": "", "multiline": True}),
+            },
+        }
+
+    def encode(self, clip, positive, negative, module_config):
+        config, enabled = _read_module_config_section(module_config, "adetailer")
+        if not enabled:
+            return (positive, negative, "ADetailer module disabled")
+        prompt = str(config.get("prompt") or "").strip()
+        negative_prompt = str(config.get("negative_prompt") or "").strip()
+        out_positive = positive
+        out_negative = negative
+        if prompt:
+            out_positive = clip.encode_from_tokens_scheduled(clip.tokenize(prompt))
+        if negative_prompt:
+            out_negative = clip.encode_from_tokens_scheduled(clip.tokenize(negative_prompt))
+        status = (
+            f"ADetailer conditioning: model={config.get('model', 'auto')} "
+            f"confidence={config.get('confidence', 0.3)} denoise={config.get('denoise', 0.4)}"
+        )
+        return (out_positive, out_negative, status)
+
+
+class WebUIPromptBridgeADetailerApply:
+    CATEGORY = "conditioning/webui/modules"
+    FUNCTION = "apply"
+    RETURN_TYPES = ("IMAGE", "MASK", "STRING")
+    RETURN_NAMES = ("image", "mask", "status")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "model": ("MODEL",),
+                "clip": ("CLIP",),
+                "vae": ("VAE",),
+                "positive": ("CONDITIONING",),
+                "negative": ("CONDITIONING",),
+                "module_config": ("STRING", {"default": "", "multiline": True}),
+                "guide_size": ("FLOAT", {"default": 512, "min": 64, "max": 16384, "step": 8}),
+                "max_size": ("FLOAT", {"default": 1024, "min": 64, "max": 16384, "step": 8}),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+                "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
+                "cfg": ("FLOAT", {"default": 8.0, "min": 0.0, "max": 100.0, "step": 0.1}),
+                "sampler_name": (comfy.samplers.KSampler.SAMPLERS, {"default": "euler"}),
+                "scheduler": (comfy.samplers.KSampler.SCHEDULERS, {"default": "normal"}),
+                "bbox_dilation": ("INT", {"default": 10, "min": -512, "max": 512, "step": 1}),
+                "bbox_crop_factor": ("FLOAT", {"default": 3.0, "min": 1.0, "max": 100.0, "step": 0.1}),
+                "drop_size": ("INT", {"default": 10, "min": 1, "max": 16384, "step": 1}),
+                "noise_mask": ("BOOLEAN", {"default": True}),
+                "force_inpaint": ("BOOLEAN", {"default": True}),
+                "wildcard": ("STRING", {"default": "", "multiline": True}),
+            },
+            "optional": {
+                "bbox_detector": ("BBOX_DETECTOR",),
+                "segm_detector": ("SEGM_DETECTOR",),
+                "sam_model": ("SAM_MODEL",),
+                "detailer_hook": ("DETAILER_HOOK",),
+            },
+        }
+
+    def apply(
+        self,
+        image,
+        model,
+        clip,
+        vae,
+        positive,
+        negative,
+        module_config,
+        guide_size=512,
+        max_size=1024,
+        seed=0,
+        steps=20,
+        cfg=8.0,
+        sampler_name="euler",
+        scheduler="normal",
+        bbox_dilation=10,
+        bbox_crop_factor=3.0,
+        drop_size=10,
+        noise_mask=True,
+        force_inpaint=True,
+        wildcard="",
+        bbox_detector=None,
+        segm_detector=None,
+        sam_model=None,
+        detailer_hook=None,
+    ):
+        config, enabled = _read_module_config_section(module_config, "adetailer")
+        if not enabled:
+            return (image, _empty_mask_for_image(image), "ADetailer module disabled")
+
+        face_detailer_class = _get_registered_node_class("FaceDetailer")
+        if face_detailer_class is None:
+            raise ValueError("找不到 Impact Pack 的 FaceDetailer。请确认 ComfyUI-Impact-Pack 已安装并重启 ComfyUI。")
+
+        detector_source = "connected"
+        if bbox_detector is None:
+            bbox_detector, auto_segm_detector, detector_source = _load_impact_ultralytics_detector(config.get("model"))
+            if segm_detector is None and str(detector_source).startswith("segm/") and _is_real_segm_detector(auto_segm_detector):
+                segm_detector = auto_segm_detector
+
+        threshold = _bounded_float(config.get("confidence"), 0.30, 0.0, 1.0)
+        denoise = _bounded_float(config.get("denoise"), 0.40, 0.0001, 1.0)
+        feather = _bounded_int(config.get("mask_blur"), 4, 0, 100)
+        cycle = _bounded_int(config.get("cycles"), 1, 1, 10)
+        wildcard_text = str(wildcard or "").strip()
+        if not wildcard_text:
+            prompt = str(config.get("prompt") or "").strip()
+            negative_prompt = str(config.get("negative_prompt") or "").strip()
+            parts = []
+            if prompt:
+                parts.append(prompt)
+            if negative_prompt:
+                parts.append(f"[NEGATIVE]{negative_prompt}")
+            wildcard_text = "\n".join(parts)
+
+        result = face_detailer_class().doit(
+            image,
+            model,
+            clip,
+            vae,
+            _bounded_float(guide_size, 512, 64, 16384),
+            True,
+            _bounded_float(max_size, 1024, 64, 16384),
+            _bounded_int(seed, 0, 0, 0xffffffffffffffff),
+            _bounded_int(steps, 20, 1, 10000),
+            _bounded_float(cfg, 8.0, 0.0, 100.0),
+            sampler_name,
+            scheduler,
+            positive,
+            negative,
+            denoise,
+            feather,
+            bool(noise_mask),
+            bool(force_inpaint),
+            threshold,
+            _bounded_int(bbox_dilation, 10, -512, 512),
+            _bounded_float(bbox_crop_factor, 3.0, 1.0, 100.0),
+            "center-1",
+            0,
+            0.93,
+            0,
+            0.7,
+            "False",
+            _bounded_int(drop_size, 10, 1, 16384),
+            bbox_detector,
+            wildcard_text,
+            cycle=cycle,
+            sam_model_opt=sam_model,
+            segm_detector_opt=segm_detector if _is_real_segm_detector(segm_detector) else None,
+            detailer_hook=detailer_hook,
+            inpaint_model=bool(config.get("inpaint_only_masked", True)),
+            noise_mask_feather=feather,
+        )
+        result_image = result[0]
+        result_mask = result[3] if len(result) > 3 and result[3] is not None else _empty_mask_for_image(image)
+        target = str(config.get("model") or "connected")
+        status = (
+            f"ADetailer applied: target={target} detector={detector_source} "
+            f"threshold={threshold:g} denoise={denoise:g} feather={feather} cycles={cycle}"
+        )
+        return (result_image, result_mask, status)
+
+
+class WebUIPromptBridgeInpaintConditioning:
+    CATEGORY = "conditioning/webui/modules"
+    FUNCTION = "encode"
+    RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT", "FLOAT", "STRING")
+    RETURN_NAMES = ("positive", "negative", "latent", "denoise", "status")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "positive": ("CONDITIONING",),
+                "negative": ("CONDITIONING",),
+                "vae": ("VAE",),
+                "pixels": ("IMAGE",),
+                "mask": ("MASK",),
+                "module_config": ("STRING", {"default": "", "multiline": True}),
+                "noise_mask": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    def encode(self, positive, negative, vae, pixels, mask, module_config, noise_mask=True):
+        sam_config, sam_enabled = _read_module_config_section(module_config, "sam_inpaint")
+        adetailer_config, adetailer_enabled = _read_module_config_section(module_config, "adetailer")
+        mask_config, mask_enabled = _read_module_config_section(module_config, "mask")
+        if not sam_enabled and not adetailer_enabled and not mask_enabled:
+            out_latent = {"samples": vae.encode(pixels)}
+            return (positive, negative, out_latent, 1.0, "Inpaint-related modules disabled")
+
+        x = (pixels.shape[1] // 8) * 8
+        y = (pixels.shape[2] // 8) * 8
+        resized_mask = torch.nn.functional.interpolate(
+            mask.reshape((-1, 1, mask.shape[-2], mask.shape[-1])),
+            size=(pixels.shape[1], pixels.shape[2]),
+            mode="bilinear",
+        )
+
+        orig_pixels = pixels
+        working_pixels = orig_pixels.clone()
+        if working_pixels.shape[1] != x or working_pixels.shape[2] != y:
+            x_offset = (working_pixels.shape[1] % 8) // 2
+            y_offset = (working_pixels.shape[2] % 8) // 2
+            working_pixels = working_pixels[:, x_offset:x + x_offset, y_offset:y + y_offset, :]
+            resized_mask = resized_mask[:, :, x_offset:x + x_offset, y_offset:y + y_offset]
+
+        masked_pixels = working_pixels.clone()
+        mask_keep = (1.0 - resized_mask.round()).squeeze(1)
+        for channel in range(3):
+            masked_pixels[:, :, :, channel] -= 0.5
+            masked_pixels[:, :, :, channel] *= mask_keep
+            masked_pixels[:, :, :, channel] += 0.5
+
+        concat_latent = vae.encode(masked_pixels)
+        orig_latent = vae.encode(orig_pixels)
+        out_latent = {"samples": orig_latent}
+        if noise_mask:
+            out_latent["noise_mask"] = resized_mask
+
+        out_positive = _conditioning_set_values(positive, {
+            "concat_latent_image": concat_latent,
+            "concat_mask": resized_mask,
+        })
+        out_negative = _conditioning_set_values(negative, {
+            "concat_latent_image": concat_latent,
+            "concat_mask": resized_mask,
+        })
+
+        if sam_enabled:
+            denoise = _bounded_float(sam_config.get("inpaint_denoise"), 0.45, 0.0, 1.0)
+            source = "SAM/Inpaint"
+        elif adetailer_enabled:
+            denoise = _bounded_float(adetailer_config.get("denoise"), 0.40, 0.0, 1.0)
+            source = "ADetailer"
+        else:
+            denoise = _bounded_float(mask_config.get("strength"), 1.0, 0.0, 1.0)
+            source = "Mask"
+        return (out_positive, out_negative, out_latent, denoise, f"{source} inpaint conditioning prepared; denoise={denoise:g}")
+
+
+_BRIDGE_NODE_SEARCH_ALIASES = {
+    "WebUIPromptBridgeADetailerConfig": ["webui adetailer", "adetailer config", "face detailer", "hand detailer"],
+    "WebUIPromptBridgeControlNetConfig": ["webui controlnet", "controlnet config", "control net"],
+    "WebUIPromptBridgeSAMInpaintConfig": ["webui sam", "sam inpaint", "segment anything", "inpaint config"],
+    "WebUIPromptBridgeUpscaleConfig": ["webui upscale", "hires fix", "ultimate upscale", "upscale config"],
+    "WebUIPromptBridgeControlNetApply": ["webui apply controlnet", "apply controlnet", "control net apply"],
+    "WebUIPromptBridgeImageUpscale": ["webui image upscale", "hires fix", "image upscale"],
+    "WebUIPromptBridgeLatentUpscale": ["webui latent upscale", "latent hires fix", "latent upscale"],
+    "WebUIPromptBridgeSetLatentMask": ["webui set latent mask", "latent mask", "mask region"],
+    "WebUIPromptBridgeADetailerConditioning": ["webui adetailer conditioning", "adetailer conditioning", "detailer prompt"],
+    "WebUIPromptBridgeADetailerApply": ["webui apply adetailer", "apply adetailer", "face detailer"],
+    "WebUIPromptBridgeInpaintConditioning": ["webui inpaint conditioning", "inpaint conditioning", "mask inpaint"],
+}
 
 
 NODE_CLASS_MAPPINGS = {
     "WebUIPromptBridge": WebUIPromptBridge,
+    "WebUIPromptBridgeADetailerConfig": WebUIPromptBridgeADetailerConfig,
+    "WebUIPromptBridgeControlNetConfig": WebUIPromptBridgeControlNetConfig,
+    "WebUIPromptBridgeSAMInpaintConfig": WebUIPromptBridgeSAMInpaintConfig,
+    "WebUIPromptBridgeUpscaleConfig": WebUIPromptBridgeUpscaleConfig,
+    "WebUIPromptBridgeControlNetApply": WebUIPromptBridgeControlNetApply,
+    "WebUIPromptBridgeImageUpscale": WebUIPromptBridgeImageUpscale,
+    "WebUIPromptBridgeLatentUpscale": WebUIPromptBridgeLatentUpscale,
+    "WebUIPromptBridgeSetLatentMask": WebUIPromptBridgeSetLatentMask,
+    "WebUIPromptBridgeADetailerConditioning": WebUIPromptBridgeADetailerConditioning,
+    "WebUIPromptBridgeADetailerApply": WebUIPromptBridgeADetailerApply,
+    "WebUIPromptBridgeInpaintConditioning": WebUIPromptBridgeInpaintConditioning,
 }
+
+for _node_name, _aliases in _BRIDGE_NODE_SEARCH_ALIASES.items():
+    _node_class = NODE_CLASS_MAPPINGS.get(_node_name)
+    if _node_class is not None:
+        base_aliases = list(getattr(_node_class, "SEARCH_ALIASES", []))
+        _node_class.SEARCH_ALIASES = [*base_aliases, *_aliases, "webui", "prompt bridge"]
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "WebUIPromptBridge": "WebUI Prompt Bridge",
+    "WebUIPromptBridgeADetailerConfig": "WebUI Bridge ADetailer Config",
+    "WebUIPromptBridgeControlNetConfig": "WebUI Bridge ControlNet Config",
+    "WebUIPromptBridgeSAMInpaintConfig": "WebUI Bridge SAM/Inpaint Config",
+    "WebUIPromptBridgeUpscaleConfig": "WebUI Bridge Upscale Config",
+    "WebUIPromptBridgeControlNetApply": "WebUI Bridge Apply ControlNet",
+    "WebUIPromptBridgeImageUpscale": "WebUI Bridge Image Upscale",
+    "WebUIPromptBridgeLatentUpscale": "WebUI Bridge Latent Upscale",
+    "WebUIPromptBridgeSetLatentMask": "WebUI Bridge Set Latent Mask",
+    "WebUIPromptBridgeADetailerConditioning": "WebUI Bridge ADetailer Conditioning",
+    "WebUIPromptBridgeADetailerApply": "WebUI Bridge Apply ADetailer",
+    "WebUIPromptBridgeInpaintConditioning": "WebUI Bridge Inpaint Conditioning",
 }
 
 
@@ -3501,11 +4753,36 @@ def _register_routes():
                 **_settings_response(),
             }, status=400)
 
+    @routes.get("/webui_prompt_bridge/module_assets")
+    async def bridge_module_assets_get(request):
+        return web.json_response(_module_asset_status())
+
+    @routes.post("/webui_prompt_bridge/install_module_assets")
+    async def bridge_install_module_assets(request):
+        rejected = reject_cross_origin(request)
+        if rejected is not None:
+            return rejected
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+        try:
+            result = _install_module_node_assets(data)
+            status = 200 if result.get("ok") else (400 if not result.get("results") else 500)
+            return web.json_response(result, status=status)
+        except Exception as exc:
+            return web.json_response({
+                "ok": False,
+                "error": str(exc),
+                "module_assets": _module_asset_status(),
+            }, status=400)
+
     @routes.get("/webui_prompt_bridge/webui_integration")
     async def webui_integration_get(request):
         return web.json_response({
             **_webui_integration_status(),
             "assets": _bridge_asset_status(),
+            "module_assets": _module_asset_status(),
             "guesses": _guess_webui_roots(),
         })
 
@@ -3583,6 +4860,9 @@ def _register_routes():
             user_metadata = {}
             raw_metadata = {}
             detected_sd_version = ""
+            metadata_title = ""
+            metadata_output_name = ""
+            training_tags = []
             created = 0
             modified = 0
             if basic:
@@ -3596,6 +4876,9 @@ def _register_routes():
                     user_metadata = _read_lora_user_metadata(lora_path, description)
                     raw_metadata = _read_lora_raw_metadata(lora_path)
                     detected_sd_version = _detect_lora_sd_version(raw_metadata, _lora_metadata_summary(name))
+                    metadata_title = raw_metadata.get("modelspec.title", "") if isinstance(raw_metadata, dict) else ""
+                    metadata_output_name = raw_metadata.get("ss_output_name", "") if isinstance(raw_metadata, dict) else ""
+                    training_tags = _lora_training_tags(raw_metadata, limit=18) if isinstance(raw_metadata, dict) else []
                     stat = Path(lora_path).stat() if lora_path else None
                     if stat:
                         created = int(getattr(stat, "st_ctime", 0))
@@ -3621,6 +4904,8 @@ def _register_routes():
                 "file_name": filename,
                 "base_name": base_name,
                 "aliases": metadata_aliases,
+                "metadata_title": metadata_title,
+                "metadata_output_name": metadata_output_name,
                 "thumbnail": thumbnail,
                 "thumbnail_unknown": basic,
                 "description": display_description,
@@ -3632,12 +4917,16 @@ def _register_routes():
                 "preferred_weight": preferred_weight,
                 "sd_version": user_metadata.get("sd version", "") or detected_sd_version,
                 "notes": user_metadata.get("notes", ""),
+                "training_tags": training_tags,
                 "search_terms": " ".join([
                     name,
                     stem,
                     folder or "",
                     base_name,
                     " ".join(metadata_aliases),
+                    metadata_title,
+                    metadata_output_name,
+                    " ".join(str(tag.get("tag", "") if isinstance(tag, dict) else (tag[0] if isinstance(tag, (list, tuple)) and tag else tag)) for tag in training_tags),
                     display_description,
                     user_metadata.get("category", "") or user_metadata.get("manual category", ""),
                     user_metadata.get("activation text", ""),
