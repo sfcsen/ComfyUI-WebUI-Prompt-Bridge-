@@ -1523,9 +1523,21 @@ function splitPromptTags(text) {
     let start = 0;
 
     const push = (end) => {
-        const raw = source.slice(start, end);
+        const rawStart = start;
+        const rawEnd = end;
+        const raw = source.slice(rawStart, rawEnd);
         const value = raw.trim();
-        if (value) tags.push({ value, start, end });
+        if (value) {
+            const leading = raw.match(/^\s*/)?.[0]?.length || 0;
+            const trailing = raw.match(/\s*$/)?.[0]?.length || 0;
+            tags.push({
+                value,
+                start: rawStart + leading,
+                end: rawEnd - trailing,
+                rawStart,
+                rawEnd,
+            });
+        }
         start = end + 1;
     };
 
@@ -1545,6 +1557,11 @@ function splitPromptTags(text) {
         }
     }
     push(source.length);
+    for (let index = 0; index < tags.length; index += 1) {
+        const next = tags[index + 1];
+        tags[index].separatorAfter = source.slice(tags[index].end, next ? next.start : source.length);
+        tags[index].separatorIsTrailing = !next;
+    }
     return tags;
 }
 
@@ -1861,7 +1878,16 @@ function loraMatchesFilter(item, filter) {
 }
 
 function setPromptTags(textarea, tags) {
-    setTextareaValue(textarea, tags.map((item) => item.value || item).filter(Boolean).join(EXTRA_SEPARATOR));
+    const items = (tags || [])
+        .map((item) => (typeof item === "string" ? { value: item } : item))
+        .filter((item) => String(item?.value || "").trim());
+    const text = items.map((item, index) => {
+        const value = String(item.value || "").trim();
+        const separator = String(item.separatorAfter || "");
+        if (index === items.length - 1) return value + (item.separatorIsTrailing ? separator : "");
+        return value + (/[,，、\n]/.test(separator) ? separator : EXTRA_SEPARATOR);
+    }).join("");
+    setTextareaValue(textarea, text);
 }
 
 function replacePromptTagAt(textarea, index, value) {
@@ -1948,6 +1974,34 @@ function setLayers(value, open, close, delta) {
 function favoriteForPrompt(state, kind, prompt) {
     const target = String(prompt || "").trim();
     return (state.promptAllInOne?.favorites?.[kind] || []).find((item) => String(item.prompt || "").trim() === target);
+}
+
+function promptSeparatorMarker(separator) {
+    const newlines = (String(separator || "").match(/\n/g) || []).length;
+    if (!newlines) return null;
+    const text = "↵".repeat(Math.min(newlines, 3)) + (newlines > 3 ? "+" : "");
+    return {
+        text,
+        title: newlines > 1 ? `${newlines} 个换行符（包含空行）` : "换行符",
+    };
+}
+
+function setPromptTagSeparatorAt(textarea, index, separator) {
+    const tags = splitPromptTags(textarea.value);
+    if (!tags[index]) return false;
+    tags[index].separatorAfter = separator;
+    tags[index].separatorIsTrailing = index >= tags.length - 1;
+    setPromptTags(textarea, tags);
+    return true;
+}
+
+function removePromptTagSeparatorAt(textarea, index) {
+    const tags = splitPromptTags(textarea.value);
+    if (!tags[index]) return false;
+    tags[index].separatorAfter = index >= tags.length - 1 ? "" : EXTRA_SEPARATOR;
+    tags[index].separatorIsTrailing = index >= tags.length - 1;
+    setPromptTags(textarea, tags);
+    return true;
 }
 
 function positionChipTools(chips, chip, tools) {
@@ -2163,11 +2217,7 @@ function renderPromptChips(row, textarea, state, afterChange, kind = "positive")
             tool("()", "加一层括号提高权重", () => !tag.disabled && replacePromptTagAt(textarea, tag.index, setLayers(tag.value, "(", ")", 1))),
             tool("[]", "加一层方括号降低权重", () => !tag.disabled && replacePromptTagAt(textarea, tag.index, setLayers(tag.value, "[", "]", 1))),
             tool("↵", "在此 tag 后换行", () => {
-                const all = splitPromptTags(textarea.value);
-                if (!tag.disabled && all[tag.index]) {
-                    all.splice(tag.index + 1, 0, { value: "\n" });
-                    setPromptTags(textarea, all);
-                }
+                if (!tag.disabled) setPromptTagSeparatorAt(textarea, tag.index, ",\n");
             }),
             tool("英", "翻译当前关键词为英文", async () => {
                 if (tag.disabled) return;
@@ -2239,6 +2289,22 @@ function renderPromptChips(row, textarea, state, afterChange, kind = "positive")
             else removePromptTagAt(textarea, item.index);
         }
         chips.append(chip);
+        const separatorMarker = !tag.disabled ? promptSeparatorMarker(tag.separatorAfter) : null;
+        if (separatorMarker) {
+            chips.append(el("div", {
+                class: "webui-bridge-prompt-chip webui-bridge-prompt-separator-chip",
+                title: `${separatorMarker.title}\n点击删除换行符`,
+                draggable: "false",
+                onclick: (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    if (removePromptTagSeparatorAt(textarea, tag.index)) afterChange?.();
+                },
+            }, [
+                el("span", { class: "webui-bridge-separator-main" }, separatorMarker.text),
+                el("span", { class: "webui-bridge-separator-label" }, "换行符"),
+            ]));
+        }
         if (lora) {
             const locallyResolved = resolveLora(state, lora.name);
             fetchLoraInfo(lora.name).then((info) => {
@@ -11141,6 +11207,41 @@ function addStyles() {
         }
         .webui-bridge-prompt-chip.drop-after {
             box-shadow: 4px 0 0 #77b5ff;
+        }
+        .webui-bridge-prompt-separator-chip {
+            min-width: 54px;
+            max-width: 86px;
+            border-color: #355d91;
+            background: #182940;
+            color: #d6e9ff;
+            cursor: pointer;
+        }
+        .webui-bridge-prompt-separator-chip:hover {
+            border-color: #78b8ff;
+            background: #20395b;
+        }
+        .webui-bridge-separator-main,
+        .webui-bridge-separator-label {
+            display: block;
+            height: 19px;
+            padding: 2px 6px;
+            box-sizing: border-box;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .webui-bridge-separator-main {
+            color: #8fc4ff;
+            text-align: center;
+            font: 700 12px/15px Consolas, Monaco, monospace;
+            font-weight: 700;
+        }
+        .webui-bridge-separator-label {
+            color: #a9cfff;
+            text-align: center;
+            background: rgba(119, 181, 255, .12);
+            font-size: 11px;
+            line-height: 15px;
         }
         .webui-bridge-prompt-chip:hover {
             border-color: #6aa3ff;
