@@ -1,66 +1,58 @@
 # ComfyUI WebUI Prompt Bridge v0.4.3
 
-This release improves prompt editing, adds image-to-image and inpaint support inside the main node, expands the prompt market, and makes onboarding clearer for new users.
+本次更新增强了提示词编辑、图生图、局部重绘、首次教程和提示词市场，适合希望在一个主节点里完成提示词整理、图片输入和常用工作流接线的用户。
 
-## Prompt Editing
+## 提示词编辑
 
-- Prompt tag editing now preserves line breaks and blank lines.
-- Deleting, dragging, or changing tag weights no longer collapses multi-character or multi-region prompts into one line.
-- Line breaks now appear as visible `↵ / 换行符` blocks in the tag area.
-- Clicking a line-break block removes that line break.
-- The toolbar `↵` button now inserts a real line break at the current position.
-- Line-break blocks use their own label and style, so they no longer display the translated name of nearby tags.
+- 提示词 tag 编辑现在会保留换行和空行。
+- 删除、拖拽、调整权重后，多角色或多区域提示词不会被压成一行。
+- tag 区域会显示可见的 `↵ / 换行符` 分块，方便确认真实换行位置。
+- 点击 `换行符` 分块可以删除对应换行。
+- 工具条里的 `↵` 按钮现在会在当前位置插入真实换行。
+- 换行符分块使用独立样式和文案，不会再误显示成相邻 tag 的中文解释。
 
-## Image-to-image and Inpaint
+## 图生图和局部重绘
 
-- Image-to-image and inpaint can now be used directly from the main WebUI Prompt Bridge node.
-- Images can be uploaded in the node sidebar, previewed immediately, and explicitly enabled for generation.
-- Inpaint masks can be painted inside the node with the built-in mask editor.
-- The node now outputs `image`, `mask`, `img2img_denoise`, and `img2img_mode` for custom workflows.
-- A one-click image-to-image wiring button can create the right VAE Encode chain and connect it to KSampler `latent_image`.
+- WebUI Prompt Bridge 主节点内置图生图和局部重绘面板。
+- 可以直接在节点侧栏上传图片、预览图片，并通过显式开关决定是否启用图生图输入。
+- 局部重绘可以在节点内打开涂抹编辑器绘制 mask。
+- 主节点新增 `image`、`mask`、`img2img_denoise` 和 `img2img_mode` 输出，方便接入自定义工作流。
+- 新增“一键接入图生图链路”，可以自动创建 VAE Encode 或 VAE Encode For Inpaint，并连接到 KSampler 的 `latent_image`。
 
-## First-time Tutorial
+## 首次教程
 
-- A guided tutorial appears the first time the main node is added.
-- The tutorial explains the main node outputs, LoRA area, image-to-image, inpaint, advanced modules, and common connection mistakes.
-- Tutorial behavior can be changed in settings: show once, show every time, disable automatic display, reset first-time status, or open manually.
+- 第一次添加 WebUI Prompt Bridge 主节点时会显示完整教程。
+- 教程会说明主节点输出、LoRA 区域、图生图、局部重绘、高级模块和常见接线问题。
+- 可以在设置里选择教程只显示一次、每次显示、不自动显示、重置首次提示，或手动打开教程。
 
-## Prompt Market
+## 提示词市场
 
-The prompt market now includes more importable and browsable sources:
+提示词市场新增更多可导入和可打开的来源：
 
-- TagComplete Danbooru + e621 merged tags
-- TagComplete e621 SFW anthropomorphic tags
-- e621 NSFW zero-filter tags
-- e621 NSFW light-filter tags
-- TagComplete Derpibooru character tags
-- Krea / Open Prompts full prompt examples
-- PromptHero, Civitai, Lexica, OpenArt, and DiffusionDB browsing entries
+- TagComplete Danbooru + e621 合并词库
+- TagComplete e621 SFW 拟人词库
+- e621 NSFW 零过滤词库
+- e621 NSFW 微过滤词库
+- TagComplete Derpibooru 角色词库
+- Krea / Open Prompts 完整 prompt 案例
+- PromptHero、Civitai、Lexica、OpenArt、DiffusionDB 等案例入口
 
-NSFW sources are split into two choices:
+NSFW 来源拆分为两个选项：
 
-- Zero-filter: imports more of the original source order.
-- Light-filter: keeps common NSFW tags while excluding more extreme or disputed terms.
+- 零过滤：尽量按原始来源顺序导入更多 tag。
+- 微过滤：保留常规 NSFW tag，同时排除更极端或争议较大的词。
 
-## Improvements
+## 体验优化
 
-- Resource downloads and extension checks now show clearer in-window progress, success, and failure states.
-- Uploaded images now use the correct ComfyUI input preview path, fixing preview load failures.
-- Image-to-image input has an explicit enable switch, so uploaded images are not used accidentally.
-- The tutorial explains the most common image-to-image issue: uploaded images only affect generation after the image/mask chain is connected to KSampler `latent_image`.
+- 资源下载和扩展检查会显示更明确的进行中、成功和失败状态。
+- 修复节点内上传图片后预览路径错误导致“载入失败”的问题。
+- 图生图输入新增显式启用开关，避免上传图片后被意外用于生成。
+- 教程中补充说明：上传图片本身不会影响生成，必须把 image / mask 链路连接到 KSampler 的 `latent_image`。
 
-## Validation
+## 升级说明
 
-- JavaScript syntax check passed.
-- Python syntax check passed.
-- Prompt line-break editing was tested through the ComfyUI API.
-- Image-to-image and inpaint were tested with Bridge image/mask outputs connected into the KSampler latent chain.
-- Prompt market sources were loaded from the local ComfyUI endpoint and the new e621 / Krea sources were parsed successfully.
+更新后请重启 ComfyUI，并强制刷新浏览器页面。
 
-## Upgrade Notes
+使用图生图或局部重绘时，请先在设置中显示 `图生图 / 局部重绘`，上传图片后点击 `一键接入图生图链路` 自动完成接线。
 
-Restart ComfyUI after updating, then hard-refresh the browser page.
-
-For image-to-image or inpaint, open Settings, enable `图生图 / 局部重绘`, upload an image, then click `一键接入图生图链路` to connect the workflow automatically.
-
-This version keeps the existing `[tool.comfy]` registry metadata and updates the package version to `0.4.3`.
+本版本保留现有 `[tool.comfy]` 注册表元数据，包版本为 `0.4.3`。
