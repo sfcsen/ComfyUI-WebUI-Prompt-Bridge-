@@ -1,22 +1,66 @@
 # ComfyUI WebUI Prompt Bridge v0.4.2
 
-这一版修复多人提示词编辑时的换行格式问题。
+This release improves prompt editing, adds image-to-image and inpaint support inside the main node, expands the prompt market, and makes onboarding clearer for new users.
 
-## 更新内容
+## Prompt Editing
 
-- 提示词 tag 编辑会保留换行/空行分隔，删除、拖拽、改权重后不会把多人提示词压成一行。
-- tag 分块里新增 `↵ / 换行符` 分块，能直观看到提示词里的真实换行。
-- 点击 `换行符` 分块可以删除该换行。
-- tag 工具条里的 `↵` 按钮现在会真正把当前位置改成换行分隔。
-- 换行符分块使用独立文案和样式，不会再显示成相邻 tag 的中文名。
+- Prompt tag editing now preserves line breaks and blank lines.
+- Deleting, dragging, or changing tag weights no longer collapses multi-character or multi-region prompts into one line.
+- Line breaks now appear as visible `↵ / 换行符` blocks in the tag area.
+- Clicking a line-break block removes that line break.
+- The toolbar `↵` button now inserts a real line break at the current position.
+- Line-break blocks use their own label and style, so they no longer display the translated name of nearby tags.
 
-## 验证
+## Image-to-image and Inpaint
 
-- `node --check web/webui_prompt_bridge.js`
-- 通过 ComfyUI API 使用 `WebUIPromptBridge` 节点提交多组带真实换行的多人提示词。
-- ComfyUI 历史记录确认 `positive_prompt` 保留 `\n`。
-- 使用 `waiNSFWIllustrious_v140.safetensors` 成功生成多张多人测试图。
+- Image-to-image and inpaint can now be used directly from the main WebUI Prompt Bridge node.
+- Images can be uploaded in the node sidebar, previewed immediately, and explicitly enabled for generation.
+- Inpaint masks can be painted inside the node with the built-in mask editor.
+- The node now outputs `image`, `mask`, `img2img_denoise`, and `img2img_mode` for custom workflows.
+- A one-click image-to-image wiring button can create the right VAE Encode chain and connect it to KSampler `latent_image`.
 
-## Comfy Registry
+## First-time Tutorial
 
-本版本将 `pyproject.toml` 版本更新为 `0.4.2`，并保留现有 `[tool.comfy]` 注册元数据。推送到 `main` 后，仓库中的 `Publish to Comfy Registry` GitHub Action 会触发 Comfy Registry 发布。
+- A guided tutorial appears the first time the main node is added.
+- The tutorial explains the main node outputs, LoRA area, image-to-image, inpaint, advanced modules, and common connection mistakes.
+- Tutorial behavior can be changed in settings: show once, show every time, disable automatic display, reset first-time status, or open manually.
+
+## Prompt Market
+
+The prompt market now includes more importable and browsable sources:
+
+- TagComplete Danbooru + e621 merged tags
+- TagComplete e621 SFW anthropomorphic tags
+- e621 NSFW zero-filter tags
+- e621 NSFW light-filter tags
+- TagComplete Derpibooru character tags
+- Krea / Open Prompts full prompt examples
+- PromptHero, Civitai, Lexica, OpenArt, and DiffusionDB browsing entries
+
+NSFW sources are split into two choices:
+
+- Zero-filter: imports more of the original source order.
+- Light-filter: keeps common NSFW tags while excluding more extreme or disputed terms.
+
+## Improvements
+
+- Resource downloads and extension checks now show clearer in-window progress, success, and failure states.
+- Uploaded images now use the correct ComfyUI input preview path, fixing preview load failures.
+- Image-to-image input has an explicit enable switch, so uploaded images are not used accidentally.
+- The tutorial explains the most common image-to-image issue: uploaded images only affect generation after the image/mask chain is connected to KSampler `latent_image`.
+
+## Validation
+
+- JavaScript syntax check passed.
+- Python syntax check passed.
+- Prompt line-break editing was tested through the ComfyUI API.
+- Image-to-image and inpaint were tested with Bridge image/mask outputs connected into the KSampler latent chain.
+- Prompt market sources were loaded from the local ComfyUI endpoint and the new e621 / Krea sources were parsed successfully.
+
+## Upgrade Notes
+
+Restart ComfyUI after updating, then hard-refresh the browser page.
+
+For image-to-image or inpaint, open Settings, enable `图生图 / 局部重绘`, upload an image, then click `一键接入图生图链路` to connect the workflow automatically.
+
+This version keeps the existing `[tool.comfy]` registry metadata and updates the package version to `0.4.2`.

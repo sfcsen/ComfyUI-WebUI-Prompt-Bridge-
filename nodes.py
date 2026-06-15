@@ -19,9 +19,12 @@ from urllib.parse import quote, unquote
 import comfy.sd
 import comfy.samplers
 import comfy.utils
+import comfy.model_management
+import numpy as np
 import folder_paths
 import torch
 import yaml
+from PIL import Image, ImageOps, ImageSequence
 
 
 NODE_DIR = Path(__file__).resolve().parent
@@ -58,6 +61,7 @@ DEFAULT_BRIDGE_SETTINGS = {
     "layout_preset": "default",
     "tag_display": "local_first",
     "lora_card_size": "normal",
+    "node_tutorial_popup": "first_time",
     "ui_visibility": {},
 }
 UI_VISIBILITY_DEFAULTS = {
@@ -73,6 +77,7 @@ UI_VISIBILITY_DEFAULTS = {
     "prompt_tools": True,
     "styles": False,
     "lora_browser": True,
+    "module_img2img": False,
     "module_mask": False,
     "module_table": False,
     "module_negative_common": False,
@@ -95,6 +100,7 @@ UI_VISIBILITY_LEGACY_KEYS = {
     "assistant_sam": "module_sam",
     "assistant_upscale": "module_upscale",
     "assistant_regional_lora": "module_regional_lora",
+    "assistant_img2img": "module_img2img",
 }
 _SETTING_CHOICES = {
     "data_source": {"auto", "webui", "builtin"},
@@ -103,6 +109,7 @@ _SETTING_CHOICES = {
     "layout_preset": {"default", "compact", "roomy", "positive_focus", "minimal_lora"},
     "tag_display": {"local_first", "prompt_first", "compact"},
     "lora_card_size": {"compact", "normal", "large"},
+    "node_tutorial_popup": {"first_time", "always", "off"},
 }
 EXTENSION_ASSETS = {
     "prompt_all_in_one": {
@@ -196,11 +203,122 @@ PROMPT_MARKET_SOURCES = {
         "limit": 200,
         "importable": True,
     },
+    "tagcomplete_danbooru_e621_merged": {
+        "label": "TagComplete Danbooru + e621 合并 Tags",
+        "description": "TagComplete 官方合并词库，覆盖二次元、拟人、兽耳/兽人等更多角色与物种特征 tag。",
+        "license": "MIT",
+        "open_url": "https://github.com/DominikDoom/a1111-sd-webui-tagcomplete/blob/main/tags/danbooru_e621_merged.csv",
+        "download_url": "https://raw.githubusercontent.com/DominikDoom/a1111-sd-webui-tagcomplete/main/tags/danbooru_e621_merged.csv",
+        "format": "tagcomplete_csv",
+        "group": "Danbooru + e621",
+        "limit": 1800,
+        "importable": True,
+    },
+    "tagcomplete_e621_sfw": {
+        "label": "TagComplete e621 SFW 拟人 Tags",
+        "description": "e621 SFW 词库，偏拟人、兽耳、兽人和物种特征，适合安全内容分类。",
+        "license": "MIT",
+        "open_url": "https://github.com/DominikDoom/a1111-sd-webui-tagcomplete/blob/main/tags/e621_sfw.csv",
+        "download_url": "https://raw.githubusercontent.com/DominikDoom/a1111-sd-webui-tagcomplete/main/tags/e621_sfw.csv",
+        "format": "tagcomplete_csv",
+        "group": "e621 SFW",
+        "limit": 900,
+        "importable": True,
+    },
+    "tagcomplete_e621_adult_raw": {
+        "label": "NSFW 专项：e621 零过滤 Tags",
+        "description": "18+ 成人向 tag 扩展包；不筛普通成人词，按原始热度尽量多导入。",
+        "license": "MIT / 18+",
+        "open_url": "https://github.com/DominikDoom/a1111-sd-webui-tagcomplete/blob/main/tags/e621.csv",
+        "download_url": "https://raw.githubusercontent.com/DominikDoom/a1111-sd-webui-tagcomplete/main/tags/e621.csv",
+        "format": "tagcomplete_csv",
+        "group": "NSFW 成人向 / e621 零过滤",
+        "limit": 1200,
+        "importable": True,
+        "adult": True,
+        "filter_profile": "零过滤",
+        "exclude_any": (
+            "child", "children", "kid", "minor", "underage", "teen", "young", "young-looking",
+            "loli", "shota", "cub", "baby", "toddler", "rape", "forced", "noncon",
+            "non-consensual", "bestiality", "zoophilia", "feral", "animal_abuse",
+        ),
+    },
+    "tagcomplete_e621_adult_light": {
+        "label": "NSFW 专项：e621 微过滤 Tags",
+        "description": "18+ 成人向 tag 扩展包；保留常规 NSFW，额外过滤极端、重口和争议词。",
+        "license": "MIT / 18+",
+        "open_url": "https://github.com/DominikDoom/a1111-sd-webui-tagcomplete/blob/main/tags/e621.csv",
+        "download_url": "https://raw.githubusercontent.com/DominikDoom/a1111-sd-webui-tagcomplete/main/tags/e621.csv",
+        "format": "tagcomplete_csv",
+        "group": "NSFW 成人向 / e621 微过滤",
+        "limit": 900,
+        "importable": True,
+        "adult": True,
+        "filter_profile": "NSFW 微过滤",
+        "exclude_any": (
+            "child", "children", "kid", "minor", "underage", "teen", "young", "young-looking",
+            "loli", "shota", "cub", "baby", "toddler", "rape", "forced", "noncon",
+            "non-consensual", "bestiality", "zoophilia", "feral", "animal_abuse",
+            "gore", "guro", "blood", "vore", "scat", "feces", "urine", "watersports",
+            "incest", "snuff", "corpse", "death", "necrophilia", "amputation",
+        ),
+    },
+    "tagcomplete_derpibooru": {
+        "label": "TagComplete Derpibooru 角色 Tags",
+        "description": "Derpibooru 标签源，适合角色、作品、风格和分类 tag 补充。",
+        "license": "MIT",
+        "open_url": "https://github.com/DominikDoom/a1111-sd-webui-tagcomplete/blob/main/tags/derpibooru.csv",
+        "download_url": "https://raw.githubusercontent.com/DominikDoom/a1111-sd-webui-tagcomplete/main/tags/derpibooru.csv",
+        "format": "tagcomplete_csv",
+        "group": "Derpibooru",
+        "limit": 800,
+        "importable": True,
+    },
+    "krea_prompt_examples": {
+        "label": "Krea / Open Prompts 完整案例",
+        "description": "Krea prompt-search 的 1k 公开 prompt 样例，导入为完整 prompt 案例。",
+        "license": "Public GitHub sample",
+        "open_url": "https://github.com/krea-ai/prompt-search/blob/master/1k.csv",
+        "download_url": "https://raw.githubusercontent.com/krea-ai/prompt-search/master/1k.csv",
+        "format": "prompt_csv",
+        "group": "完整 Prompt 案例",
+        "subgroup": "Krea / Open Prompts",
+        "limit": 1000,
+        "importable": True,
+    },
     "public_prompts": {
         "label": "Public Prompts",
         "description": "免费提示词案例站，适合打开后挑选完整 prompt；暂不做批量抓取。",
         "license": "Free website",
         "open_url": "https://www.publicprompts.art/",
+        "importable": False,
+    },
+    "prompthero_stable_diffusion": {
+        "label": "PromptHero Stable Diffusion",
+        "description": "热门 Stable Diffusion prompt 案例页，适合按作品手动挑完整 prompt。",
+        "license": "Website",
+        "open_url": "https://prompthero.com/stable-diffusion-prompts",
+        "importable": False,
+    },
+    "civitai_images": {
+        "label": "Civitai 图片 Prompt 案例",
+        "description": "模型社区图片案例页，常带完整 prompt / negative / 参数，适合手动筛选。",
+        "license": "Website",
+        "open_url": "https://civitai.com/images",
+        "importable": False,
+    },
+    "lexica_prompt_search": {
+        "label": "Lexica Prompt Search",
+        "description": "Stable Diffusion 图片与 prompt 搜索站，适合查风格词和构图案例。",
+        "license": "Website",
+        "open_url": "https://lexica.art/",
+        "importable": False,
+    },
+    "openart_prompt_book": {
+        "label": "OpenArt Prompt Book",
+        "description": "Prompt 教程和案例库，适合手动学习结构化 prompt 写法。",
+        "license": "Website",
+        "open_url": "https://openart.ai/promptbook",
         "importable": False,
     },
     "diffusiondb": {
@@ -2621,6 +2739,7 @@ def _prompt_market_sources_response():
             "label": source["label"],
             "description": source.get("description", ""),
             "license": source.get("license", ""),
+            "filter_profile": source.get("filter_profile", ""),
             "open_url": source.get("open_url", ""),
             "importable": bool(source.get("importable")),
             "limit": source.get("limit"),
@@ -2651,6 +2770,30 @@ def _infer_prompt_market_kind(*values):
         "malformed", "mutated", "deformed", "watermark",
     )
     return "negative" if any(marker in text for marker in negative_markers) else "positive"
+
+
+def _prompt_market_text_matches_any(text, markers):
+    folded = str(text or "").casefold().replace("_", " ").replace("-", " ")
+    raw = str(text or "").casefold()
+    for marker in markers or ():
+        needle = str(marker or "").casefold().strip()
+        if not needle:
+            continue
+        loose = needle.replace("_", " ").replace("-", " ")
+        if needle in raw or loose in folded:
+            return True
+    return False
+
+
+def _prompt_market_item_allowed(prompt, source):
+    text = str(prompt or "")
+    include_any = source.get("include_any")
+    if include_any and not _prompt_market_text_matches_any(text, include_any):
+        return False
+    exclude_any = source.get("exclude_any")
+    if exclude_any and _prompt_market_text_matches_any(text, exclude_any):
+        return False
+    return True
 
 
 def _items_from_prompt_all_in_one_yaml(text, source):
@@ -2689,6 +2832,8 @@ def _items_from_tagcomplete_csv(text, source):
         tag_type = str(row[1] or "").strip()
         if not prompt or prompt.startswith("#"):
             continue
+        if not _prompt_market_item_allowed(prompt, source):
+            continue
         subgroup = TAGCOMPLETE_TYPE_LABELS.get(tag_type, "其他")
         local = str(row[2] or "").strip() if len(row) > 2 and not str(row[2] or "").strip().isdigit() else ""
         local = zh_map.get(prompt.casefold(), local)
@@ -2699,6 +2844,33 @@ def _items_from_tagcomplete_csv(text, source):
             "group": group,
             "subgroup": subgroup,
             "kind": kind,
+        })
+        if len(items) >= limit:
+            break
+    return items
+
+
+def _items_from_prompt_csv(text, source):
+    rows = csv.DictReader(text.splitlines())
+    items = []
+    group = str(source.get("group") or source["label"]).strip()
+    subgroup = str(source.get("subgroup") or "完整 Prompt").strip()
+    prompt_key = str(source.get("prompt_column") or "prompt").strip()
+    limit = int(source.get("limit") or 1000)
+    seen = set()
+    for row in rows:
+        prompt = str(row.get(prompt_key) or "").strip()
+        if not prompt or prompt.casefold() in seen:
+            continue
+        if not _prompt_market_item_allowed(prompt, source):
+            continue
+        seen.add(prompt.casefold())
+        items.append({
+            "prompt": prompt,
+            "local": "",
+            "group": group,
+            "subgroup": subgroup,
+            "kind": _infer_prompt_market_kind(prompt, group, subgroup),
         })
         if len(items) >= limit:
             break
@@ -2789,6 +2961,8 @@ def _load_prompt_market_items(source_id):
             items = _items_from_prompt_all_in_one_yaml(text, source)
         elif source_format == "tagcomplete_csv":
             items = _items_from_tagcomplete_csv(text, source)
+        elif source_format == "prompt_csv":
+            items = _items_from_prompt_csv(text, source)
         else:
             raise ValueError("unsupported prompt market format")
     else:
@@ -3506,8 +3680,8 @@ class WebUIPromptBridge:
         "提示词桥接",
     ]
     FUNCTION = "build"
-    RETURN_TYPES = ("MODEL", "CLIP", "CONDITIONING", "CONDITIONING", "STRING", "STRING", "STRING", "STRING")
-    RETURN_NAMES = ("model", "clip", "positive", "negative", "positive_text", "negative_text", "lora_info", "module_config")
+    RETURN_TYPES = ("MODEL", "CLIP", "CONDITIONING", "CONDITIONING", "STRING", "STRING", "STRING", "STRING", "IMAGE", "MASK", "FLOAT", "STRING")
+    RETURN_NAMES = ("model", "clip", "positive", "negative", "positive_text", "negative_text", "lora_info", "module_config", "image", "mask", "img2img_denoise", "img2img_mode")
 
     def __init__(self):
         self.loaded_loras = {}
@@ -3607,6 +3781,11 @@ class WebUIPromptBridge:
                 "module_upscale_tile_height": ("INT", {"default": 768, "min": 128, "max": 4096, "step": 8}),
                 "module_upscale_overlap": ("INT", {"default": 64, "min": 0, "max": 1024, "step": 8}),
                 "module_regional_lora_enabled": ("BOOLEAN", {"default": False}),
+                "module_img2img_image": ("STRING", {"default": "", "multiline": False}),
+                "module_img2img_mask": ("STRING", {"default": "", "multiline": False}),
+                "module_img2img_mode": (["img2img", "inpaint"], {"default": "img2img"}),
+                "module_img2img_denoise": ("FLOAT", {"default": 0.55, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "module_img2img_enabled": ("BOOLEAN", {"default": False}),
             },
             "optional": {
                 "regional_mask": ("MASK",),
@@ -3690,6 +3869,11 @@ class WebUIPromptBridge:
         module_upscale_tile_height=768,
         module_upscale_overlap=64,
         module_regional_lora_enabled=False,
+        module_img2img_image="",
+        module_img2img_mask="",
+        module_img2img_mode="img2img",
+        module_img2img_denoise=0.55,
+        module_img2img_enabled=False,
         regional_mask=None,
         prompt=None,
         unique_id=None,
@@ -3698,6 +3882,8 @@ class WebUIPromptBridge:
             default_clip_strength = float(default_clip_strength)
         except (TypeError, ValueError):
             default_clip_strength = 1.0
+        module_img2img_image = _coerce_bridge_image_ref(module_img2img_image)
+        module_img2img_mask = _coerce_bridge_image_ref(module_img2img_mask)
 
         positive_text, positive_loras = _parse_lora_tags(positive_prompt)
         negative_text, negative_loras = _parse_lora_tags(negative_prompt)
@@ -3765,6 +3951,13 @@ class WebUIPromptBridge:
                     "axis": module_flip_axis if module_flip_axis in {"auto", "horizontal", "vertical"} else "auto",
                 },
                 "presets": {"enabled": bool(module_presets_enabled)},
+                "img2img": {
+                    "enabled": bool(module_img2img_enabled and module_img2img_image),
+                    "image": str(module_img2img_image or ""),
+                    "mask": str(module_img2img_mask or ""),
+                    "mode": str(module_img2img_mode or "img2img"),
+                    "denoise": _bounded_float(module_img2img_denoise, 0.55, 0.0, 1.0),
+                },
                 "adetailer": {
                     "enabled": bool(module_adetailer_enabled),
                     "model": str(module_adetailer_model or "face_yolov8m.pt"),
@@ -3983,6 +4176,18 @@ class WebUIPromptBridge:
         if module_regional_lora_enabled:
             regional_lora_count = len(_parse_lora_tags(positive_text)[1])
             module_info.append(f"Regional LoRA audit=on detected={regional_lora_count} global LoRA(s)")
+        img2img_image, img2img_mask = _empty_bridge_image()
+        img2img_mode = str(module_img2img_mode or "img2img")
+        img2img_denoise = _bounded_float(module_img2img_denoise, 0.55, 0.0, 1.0)
+        if module_img2img_enabled and module_img2img_image:
+            img2img_image, alpha_mask = _load_bridge_image_tensor(module_img2img_image)
+            img2img_mask = _load_bridge_mask_tensor(module_img2img_mask, img2img_image) if module_img2img_mask else alpha_mask
+            if img2img_mode != "inpaint" and not module_img2img_mask:
+                img2img_mask = _empty_mask_for_image(img2img_image)
+            module_info.append(
+                f"Img2Img input=on mode={img2img_mode} denoise={img2img_denoise:g}"
+                + (f" mask={module_img2img_mask}" if module_img2img_mask else "")
+            )
         module_config["prompts"] = {
             "positive": positive_text,
             "negative": negative_text,
@@ -4024,7 +4229,20 @@ class WebUIPromptBridge:
             print("[WebUIPromptBridge] Missing LoRAs: " + ", ".join(missing))
 
         module_config_text = json.dumps(module_config, ensure_ascii=False, separators=(",", ":"))
-        return (model, clip, positive, negative, positive_text, negative_text, info, module_config_text)
+        return (
+            model,
+            clip,
+            positive,
+            negative,
+            positive_text,
+            negative_text,
+            info,
+            module_config_text,
+            img2img_image,
+            img2img_mask,
+            img2img_denoise,
+            img2img_mode,
+        )
 
 
 def _read_module_config_section(module_config, section):
@@ -4045,6 +4263,132 @@ def _empty_mask_for_image(image):
         return torch.zeros((image.shape[0], image.shape[1], image.shape[2]), dtype=image.dtype, device=image.device)
     except Exception:
         return torch.zeros((1, 64, 64))
+
+
+def _empty_bridge_image(width=64, height=64):
+    dtype = comfy.model_management.intermediate_dtype()
+    device = comfy.model_management.intermediate_device()
+    image = torch.zeros((1, int(height), int(width), 3), dtype=dtype, device=device)
+    mask = torch.zeros((1, int(height), int(width)), dtype=dtype, device=device)
+    return image, mask
+
+
+def _coerce_bridge_image_ref(value):
+    name = str(value or "").strip()
+    if not name:
+        return ""
+    lowered = name.lower()
+    if not lowered.endswith((".png", ".jpg", ".jpeg", ".webp")):
+        return ""
+    return name
+
+
+def _load_bridge_image_tensor(image_name):
+    image_path = folder_paths.get_annotated_filepath(image_name)
+    dtype = comfy.model_management.intermediate_dtype()
+    device = comfy.model_management.intermediate_device()
+    img = Image.open(image_path)
+    output_images = []
+    output_alpha_masks = []
+    width = None
+    height = None
+    for frame in ImageSequence.Iterator(img):
+        frame = ImageOps.exif_transpose(frame)
+        image = frame.convert("RGB")
+        if width is None:
+            width, height = image.size
+        if image.size != (width, height):
+            continue
+        image_array = np.array(image).astype(np.float32) / 255.0
+        output_images.append(torch.from_numpy(image_array)[None,].to(dtype=dtype))
+        if "A" in frame.getbands():
+            alpha = np.array(frame.getchannel("A")).astype(np.float32) / 255.0
+            output_alpha_masks.append((1.0 - torch.from_numpy(alpha)).unsqueeze(0).to(dtype=dtype))
+        else:
+            output_alpha_masks.append(torch.zeros((1, height, width), dtype=dtype))
+    if not output_images:
+        raise ValueError(f"Invalid image file: {image_name}")
+    return (
+        torch.cat(output_images, dim=0).to(device=device, dtype=dtype),
+        torch.cat(output_alpha_masks, dim=0).to(device=device, dtype=dtype),
+    )
+
+
+def _load_bridge_mask_tensor(mask_name, image):
+    if not mask_name:
+        return _empty_mask_for_image(image)
+    mask_path = folder_paths.get_annotated_filepath(mask_name)
+    dtype = image.dtype
+    device = image.device
+    height = int(image.shape[1])
+    width = int(image.shape[2])
+    mask_image = Image.open(mask_path)
+    masks = []
+    for frame in ImageSequence.Iterator(mask_image):
+        frame = ImageOps.exif_transpose(frame).convert("L")
+        if frame.size != (width, height):
+            frame = frame.resize((width, height), Image.Resampling.LANCZOS)
+        mask = np.array(frame).astype(np.float32) / 255.0
+        masks.append(torch.from_numpy(mask).unsqueeze(0).to(device=device, dtype=dtype))
+    if not masks:
+        return _empty_mask_for_image(image)
+    mask = torch.cat(masks, dim=0)
+    if mask.shape[0] == 1 and image.shape[0] > 1:
+        mask = mask.repeat(image.shape[0], 1, 1)
+    return mask[: image.shape[0]]
+
+
+class WebUIPromptBridgeImageInput:
+    CATEGORY = "conditioning/webui"
+    SEARCH_ALIASES = ["webui img2img", "webui image input", "webui inpaint", "bridge image input", "图生图", "局部重绘"]
+    FUNCTION = "load"
+    RETURN_TYPES = ("IMAGE", "MASK", "FLOAT", "STRING", "STRING")
+    RETURN_NAMES = ("image", "mask", "denoise", "mode", "status")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("STRING", {"default": "", "multiline": False}),
+                "mask": ("STRING", {"default": "", "multiline": False}),
+                "mode": (["img2img", "inpaint"], {"default": "img2img"}),
+                "denoise": ("FLOAT", {"default": 0.55, "min": 0.0, "max": 1.0, "step": 0.01}),
+            },
+        }
+
+    def load(self, image, mask="", mode="img2img", denoise=0.55):
+        if not image:
+            raise ValueError("请先在 WebUI Bridge Image Input 节点内上传图片")
+        pixels, alpha_mask = _load_bridge_image_tensor(image)
+        mask_tensor = _load_bridge_mask_tensor(mask, pixels) if mask else alpha_mask
+        if mode != "inpaint" and not mask:
+            mask_tensor = _empty_mask_for_image(pixels)
+        denoise_value = _bounded_float(denoise, 0.55, 0.0, 1.0)
+        status = f"{mode} image loaded: {image}" + (f"; mask={mask}" if mask else "")
+        return (pixels, mask_tensor, denoise_value, str(mode or "img2img"), status)
+
+    @classmethod
+    def IS_CHANGED(cls, image, mask="", mode="img2img", denoise=0.55):
+        digest = hashlib.sha256()
+        for name in (image, mask):
+            if not name:
+                continue
+            path = folder_paths.get_annotated_filepath(name)
+            with open(path, "rb") as handle:
+                digest.update(handle.read())
+        digest.update(str(mode).encode("utf-8"))
+        digest.update(str(denoise).encode("utf-8"))
+        return digest.hexdigest()
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, image, mask="", mode="img2img", denoise=0.55):
+        if not image:
+            return "Image is required"
+        if not folder_paths.exists_annotated_filepath(image):
+            return f"Invalid image file: {image}"
+        if mask and not folder_paths.exists_annotated_filepath(mask):
+            return f"Invalid mask file: {mask}"
+        return True
 
 
 def _get_registered_node_class(class_name):
@@ -4547,6 +4891,7 @@ class WebUIPromptBridgeInpaintConditioning:
 
 
 _BRIDGE_NODE_SEARCH_ALIASES = {
+    "WebUIPromptBridgeImageInput": ["webui img2img", "image input", "inpaint image", "图生图", "局部重绘"],
     "WebUIPromptBridgeADetailerConfig": ["webui adetailer", "adetailer config", "face detailer", "hand detailer"],
     "WebUIPromptBridgeControlNetConfig": ["webui controlnet", "controlnet config", "control net"],
     "WebUIPromptBridgeSAMInpaintConfig": ["webui sam", "sam inpaint", "segment anything", "inpaint config"],
@@ -4563,6 +4908,7 @@ _BRIDGE_NODE_SEARCH_ALIASES = {
 
 NODE_CLASS_MAPPINGS = {
     "WebUIPromptBridge": WebUIPromptBridge,
+    "WebUIPromptBridgeImageInput": WebUIPromptBridgeImageInput,
     "WebUIPromptBridgeADetailerConfig": WebUIPromptBridgeADetailerConfig,
     "WebUIPromptBridgeControlNetConfig": WebUIPromptBridgeControlNetConfig,
     "WebUIPromptBridgeSAMInpaintConfig": WebUIPromptBridgeSAMInpaintConfig,
@@ -4584,6 +4930,7 @@ for _node_name, _aliases in _BRIDGE_NODE_SEARCH_ALIASES.items():
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "WebUIPromptBridge": "WebUI Prompt Bridge",
+    "WebUIPromptBridgeImageInput": "WebUI Bridge Image Input",
     "WebUIPromptBridgeADetailerConfig": "WebUI Bridge ADetailer Config",
     "WebUIPromptBridgeControlNetConfig": "WebUI Bridge ControlNet Config",
     "WebUIPromptBridgeSAMInpaintConfig": "WebUI Bridge SAM/Inpaint Config",
@@ -4614,6 +4961,45 @@ def _register_routes():
         if _validate_same_origin_request(request):
             return None
         return web.json_response({"error": "Cross-origin requests are not allowed"}, status=403)
+
+    @routes.post("/webui_prompt_bridge/image_input_upload")
+    async def image_input_upload(request):
+        rejected = reject_cross_origin(request)
+        if rejected is not None:
+            return rejected
+        reader = await request.multipart()
+        image_bytes = b""
+        extension = ".png"
+        kind = "image"
+        field = await reader.next()
+        while field:
+            if field.name == "kind":
+                kind = _truncate_text((await field.text()).strip().lower(), 20)
+            elif field.name == "image":
+                filename = field.filename or ""
+                suffix = Path(filename).suffix.lower()
+                if suffix in (".png", ".jpg", ".jpeg", ".webp"):
+                    extension = suffix
+                image_bytes = await field.read(decode=False)
+            field = await reader.next()
+        if kind not in {"image", "mask"}:
+            return web.json_response({"error": "Invalid image input kind"}, status=400)
+        if not image_bytes:
+            return web.json_response({"error": "Image file is required"}, status=400)
+        if len(image_bytes) > 40 * 1024 * 1024:
+            return web.json_response({"error": "Image file is too large"}, status=400)
+        try:
+            _validate_preview_image(image_bytes, extension)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+        input_dir = Path(folder_paths.get_input_directory())
+        target_dir = input_dir / "webui_prompt_bridge"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = f"{kind}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}{extension}"
+        target_path = target_dir / safe_name
+        target_path.write_bytes(image_bytes)
+        relative_name = f"webui_prompt_bridge/{safe_name}"
+        return web.json_response({"name": relative_name, "kind": kind})
 
     @routes.get("/webui_prompt_bridge/settings")
     async def bridge_settings_get(request):

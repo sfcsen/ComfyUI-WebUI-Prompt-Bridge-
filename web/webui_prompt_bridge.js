@@ -5,6 +5,7 @@ const BRIDGE_DEBUG = window.__webuiPromptBridgeDebug = window.__webuiPromptBridg
 BRIDGE_DEBUG.app = app;
 
 const TARGET_NODE = "WebUIPromptBridge";
+const IMAGE_INPUT_NODE = "WebUIPromptBridgeImageInput";
 const PROMPT_WIDGETS = new Set([
     "positive_prompt",
     "negative_prompt",
@@ -67,6 +68,11 @@ const PROMPT_WIDGETS = new Set([
     "module_upscale_tile_height",
     "module_upscale_overlap",
     "module_regional_lora_enabled",
+    "module_img2img_image",
+    "module_img2img_mask",
+    "module_img2img_mode",
+    "module_img2img_denoise",
+    "module_img2img_enabled",
 ]);
 const EXTRA_SEPARATOR = ", ";
 const ATTENTION_STEP = 0.1;
@@ -119,6 +125,7 @@ const REGIONAL_HEIGHT_ALIASES = [
 const LAYOUT_STORAGE_VERSION = "2026-06-10-corner-resize-lora-v1";
 const AIO_POSITIVE_MIN_HEIGHT = 180;
 const AIO_NEGATIVE_MIN_HEIGHT = 220;
+const NODE_TUTORIAL_SEEN_KEY = "webui-bridge-node-tutorial-seen-v2";
 const DEFAULT_BRIDGE_SETTINGS = {
     data_source: "auto",
     translation_source: "auto",
@@ -127,6 +134,7 @@ const DEFAULT_BRIDGE_SETTINGS = {
     layout_preset: "default",
     tag_display: "local_first",
     lora_card_size: "normal",
+    node_tutorial_popup: "first_time",
     ui_visibility: {},
 };
 const UI_VISIBILITY_DEFAULTS = {
@@ -142,6 +150,7 @@ const UI_VISIBILITY_DEFAULTS = {
     prompt_tools: true,
     styles: false,
     lora_browser: true,
+    module_img2img: false,
     module_mask: false,
     module_table: false,
     module_negative_common: false,
@@ -195,6 +204,7 @@ const MAIN_MODULE_VISIBILITY_OPTIONS = [
     ["module_presets", "区域 Preset"],
 ];
 const ADVANCED_MODULE_VISIBILITY_OPTIONS = [
+    ["module_img2img", "图生图 / 局部重绘"],
     ["module_mask", "Mask 区域"],
     ["module_controlnet", "ControlNet"],
     ["module_adetailer", "ADetailer"],
@@ -217,6 +227,7 @@ const UI_VISIBILITY_LEGACY_KEYS = {
     assistant_sam: "module_sam",
     assistant_upscale: "module_upscale",
     assistant_regional_lora: "module_regional_lora",
+    assistant_img2img: "module_img2img",
 };
 const SETTING_CHOICES = {
     data_source: ["auto", "webui", "builtin"],
@@ -225,6 +236,7 @@ const SETTING_CHOICES = {
     layout_preset: ["default", "compact", "roomy", "positive_focus", "minimal_lora"],
     tag_display: ["local_first", "prompt_first", "compact"],
     lora_card_size: ["compact", "normal", "large"],
+    node_tutorial_popup: ["first_time", "always", "off"],
 };
 const WEBUI_CHECK_LABELS = {
     styles_file: "样式",
@@ -928,6 +940,340 @@ function isBridgePanelUsable(node) {
     const panel = node.__webuiBridgePanel;
     if (!panel?.querySelector?.(".webui-bridge-toprow, .webui-bridge-panel-error")) return false;
     return Boolean((node.widgets || []).some((widget) => widget?.name === "webui_prompt_frontend" && widget.element === panel));
+}
+
+function bridgeInputViewUrl(name) {
+    if (!name) return "";
+    const normalized = String(name || "").replace(/\\/g, "/");
+    const parts = normalized.split("/").filter(Boolean);
+    const filename = parts.pop() || "";
+    const params = new URLSearchParams({
+        filename,
+        type: "input",
+        rand: String(Date.now()),
+    });
+    if (parts.length) params.set("subfolder", parts.join("/"));
+    const path = `/view?${params.toString()}`;
+    return typeof api.apiURL === "function" ? api.apiURL(path) : path;
+}
+
+function normalizeBridgeImageRef(value) {
+    const name = String(value || "").trim();
+    return /\.(png|jpe?g|webp)$/i.test(name) ? name : "";
+}
+
+async function uploadBridgeImageInput(file, kind = "image") {
+    const form = new FormData();
+    form.append("kind", kind);
+    form.append("image", file, file.name || `${kind}.png`);
+    const response = await api.fetchApi("/webui_prompt_bridge/image_input_upload", {
+        method: "POST",
+        body: form,
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "图片上传失败");
+    return data;
+}
+
+function canvasBlob(canvas, filename = "mask.png") {
+    return new Promise((resolve, reject) => {
+        canvas.toBlob((blob) => {
+            if (!blob) {
+                reject(new Error("画布导出失败"));
+                return;
+            }
+            resolve(new File([blob], filename, { type: "image/png" }));
+        }, "image/png");
+    });
+}
+
+function showBridgeMaskEditor(node, imageName, maskName, onSaved, widgetNames = {}) {
+    const maskWidgetName = widgetNames.mask || "mask";
+    const modeWidgetName = widgetNames.mode || "mode";
+    if (!imageName) {
+        onSaved?.("", "请先上传图片");
+        return;
+    }
+    const overlay = el("div", { class: "webui-bridge-config-mask webui-bridge-image-editor-mask" });
+    const status = el("div", { class: "webui-bridge-image-input-status" }, "载入图片...");
+    const brushSize = el("input", { type: "range", min: "4", max: "160", step: "2", value: "40" });
+    const eraseToggle = el("input", { type: "checkbox" });
+    const stage = el("div", { class: "webui-bridge-image-editor-stage" });
+    const baseCanvas = el("canvas", {});
+    const maskCanvas = el("canvas", {});
+    const cursor = el("div", { class: "webui-bridge-image-editor-cursor" });
+    stage.append(baseCanvas, maskCanvas, cursor);
+    const close = () => overlay.remove();
+    const panel = el("div", { class: "webui-bridge-config-panel webui-bridge-image-editor-panel" }, [
+        el("div", { class: "webui-bridge-config-head" }, [
+            el("div", { class: "webui-bridge-settings-title" }, [
+                el("span", {}, "局部涂抹编辑"),
+                el("small", {}, "亮色区域会作为 inpaint mask 输出"),
+            ]),
+            el("button", { type: "button", onclick: close }, "×"),
+        ]),
+        el("div", { class: "webui-bridge-image-editor-toolbar" }, [
+            el("label", {}, [el("span", {}, "画笔"), brushSize]),
+            el("label", { class: "webui-bridge-config-check" }, [eraseToggle, el("span", {}, "橡皮")]),
+            el("button", { type: "button", onclick: () => {
+                maskCanvas.getContext("2d").clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+                status.textContent = "Mask 已清空";
+            } }, "清空"),
+        ]),
+        stage,
+        status,
+        el("div", { class: "webui-bridge-config-actions" }, [
+            el("button", { type: "button", onclick: close }, "取消"),
+            el("button", {
+                type: "button",
+                class: "primary",
+                onclick: async () => {
+                    try {
+                        status.textContent = "保存 mask...";
+                        const file = await canvasBlob(maskCanvas, "bridge-mask.png");
+                        const result = await uploadBridgeImageInput(file, "mask");
+                        setWidgetValue(node, maskWidgetName, result.name || "");
+                        setWidgetValue(node, modeWidgetName, "inpaint");
+                        onSaved?.(result.name || "", "Mask 已保存，模式已切到 Inpaint");
+                        close();
+                    } catch (error) {
+                        status.textContent = error?.message || "Mask 保存失败";
+                    }
+                },
+            }, "保存 Mask"),
+        ]),
+    ]);
+
+    const paintAt = (event) => {
+        const rect = maskCanvas.getBoundingClientRect();
+        const scaleX = maskCanvas.width / rect.width;
+        const scaleY = maskCanvas.height / rect.height;
+        const x = (event.clientX - rect.left) * scaleX;
+        const y = (event.clientY - rect.top) * scaleY;
+        const radius = Number(brushSize.value || 40) * scaleX / 2;
+        const ctx = maskCanvas.getContext("2d");
+        ctx.save();
+        ctx.globalCompositeOperation = eraseToggle.checked ? "destination-out" : "source-over";
+        ctx.fillStyle = "rgba(255,255,255,1)";
+        ctx.beginPath();
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+    };
+    let drawing = false;
+    maskCanvas.addEventListener("pointerdown", (event) => {
+        drawing = true;
+        maskCanvas.setPointerCapture?.(event.pointerId);
+        paintAt(event);
+    });
+    maskCanvas.addEventListener("pointermove", (event) => {
+        const rect = maskCanvas.getBoundingClientRect();
+        cursor.style.left = `${event.clientX - rect.left}px`;
+        cursor.style.top = `${event.clientY - rect.top}px`;
+        cursor.style.width = `${brushSize.value}px`;
+        cursor.style.height = `${brushSize.value}px`;
+        cursor.classList.add("visible");
+        if (drawing) paintAt(event);
+    });
+    maskCanvas.addEventListener("pointerup", () => { drawing = false; });
+    maskCanvas.addEventListener("pointerleave", () => {
+        drawing = false;
+        cursor.classList.remove("visible");
+    });
+    overlay.addEventListener("mousedown", (event) => {
+        if (event.target === overlay) close();
+    });
+    overlay.append(panel);
+    document.body.append(overlay);
+
+    const baseImage = new Image();
+    baseImage.onload = () => {
+        const maxWidth = Math.min(960, Math.max(420, window.innerWidth - 120));
+        const maxHeight = Math.min(680, Math.max(360, window.innerHeight - 260));
+        const ratio = Math.min(1, maxWidth / baseImage.naturalWidth, maxHeight / baseImage.naturalHeight);
+        const cssWidth = Math.max(240, Math.round(baseImage.naturalWidth * ratio));
+        const cssHeight = Math.max(180, Math.round(baseImage.naturalHeight * ratio));
+        for (const canvas of [baseCanvas, maskCanvas]) {
+            canvas.width = baseImage.naturalWidth;
+            canvas.height = baseImage.naturalHeight;
+            canvas.style.width = `${cssWidth}px`;
+            canvas.style.height = `${cssHeight}px`;
+        }
+        baseCanvas.getContext("2d").drawImage(baseImage, 0, 0);
+        stage.style.width = `${cssWidth}px`;
+        stage.style.height = `${cssHeight}px`;
+        status.textContent = "按住拖动涂抹需要重绘的区域";
+        if (maskName) {
+            const maskImage = new Image();
+            maskImage.onload = () => {
+                maskCanvas.getContext("2d").drawImage(maskImage, 0, 0, maskCanvas.width, maskCanvas.height);
+            };
+            maskImage.src = bridgeInputViewUrl(maskName);
+        }
+    };
+    baseImage.onerror = () => { status.textContent = "图片载入失败"; };
+    baseImage.src = bridgeInputViewUrl(imageName);
+}
+
+function buildBridgeImageInputPanel(node, options = {}) {
+    const widgetNames = {
+        image: options.imageWidget || "image",
+        mask: options.maskWidget || "mask",
+        mode: options.modeWidget || "mode",
+        denoise: options.denoiseWidget || "denoise",
+        enabled: options.enabledWidget || "enabled",
+    };
+    const imageWidget = getWidget(node, widgetNames.image);
+    const maskWidget = getWidget(node, widgetNames.mask);
+    const modeWidget = getWidget(node, widgetNames.mode);
+    const denoiseWidget = getWidget(node, widgetNames.denoise);
+    const enabledWidget = getWidget(node, widgetNames.enabled);
+    const fileInput = el("input", { type: "file", accept: "image/png,image/jpeg,image/webp", style: { display: "none" } });
+    const preview = el("div", { class: "webui-bridge-image-input-preview" });
+    const status = el("div", { class: "webui-bridge-image-input-status" });
+    const enabledInput = el("input", { type: "checkbox" });
+    const modeSelect = el("select", { class: "webui-bridge-config-input" }, [
+        el("option", { value: "img2img" }, "Img2Img"),
+        el("option", { value: "inpaint" }, "Inpaint"),
+    ]);
+    const denoise = el("input", { type: "range", min: "0", max: "1", step: "0.01", value: String(denoiseWidget?.value ?? 0.55) });
+    const denoiseText = el("span", {}, "");
+    const render = () => {
+        const imageName = normalizeBridgeImageRef(imageWidget?.value);
+        const maskName = normalizeBridgeImageRef(maskWidget?.value);
+        modeSelect.value = String(modeWidget?.value || "img2img");
+        denoise.value = String(denoiseWidget?.value ?? 0.55);
+        enabledInput.checked = enabledWidget ? Boolean(enabledWidget.value) : true;
+        preview.classList.toggle("disabled", !enabledInput.checked);
+        denoiseText.textContent = Number(denoise.value || 0).toFixed(2);
+        preview.innerHTML = "";
+        if (imageName) {
+            preview.append(el("img", { src: bridgeInputViewUrl(imageName), alt: "" }));
+            preview.append(el("span", {}, maskName ? "已上传图片和局部 mask" : "已上传图片"));
+        } else {
+            preview.append(el("span", {}, "拖入或上传图片"));
+        }
+        status.textContent = imageName
+            ? (enabledInput.checked ? imageName : `${imageName}（未启用）`)
+            : "未选择图片";
+    };
+    enabledInput.addEventListener("change", () => {
+        if (enabledWidget) setWidgetValue(node, widgetNames.enabled, enabledInput.checked);
+        render();
+    });
+    modeSelect.addEventListener("change", () => setWidgetValue(node, widgetNames.mode, modeSelect.value));
+    denoise.addEventListener("input", () => {
+        denoiseText.textContent = Number(denoise.value || 0).toFixed(2);
+        setWidgetValue(node, widgetNames.denoise, Number(denoise.value || 0));
+    });
+    fileInput.addEventListener("change", async () => {
+        const file = fileInput.files?.[0];
+        if (!file) return;
+        try {
+            status.textContent = "上传图片...";
+            const result = await uploadBridgeImageInput(file, "image");
+            setWidgetValue(node, widgetNames.image, result.name || "");
+            setWidgetValue(node, widgetNames.mask, "");
+            if (enabledWidget) setWidgetValue(node, widgetNames.enabled, true);
+            render();
+        } catch (error) {
+            status.textContent = error?.message || "上传失败";
+        } finally {
+            fileInput.value = "";
+        }
+    });
+    preview.addEventListener("dragover", (event) => {
+        event.preventDefault();
+        preview.classList.add("dragging");
+    });
+    preview.addEventListener("dragleave", () => preview.classList.remove("dragging"));
+    preview.addEventListener("drop", async (event) => {
+        event.preventDefault();
+        preview.classList.remove("dragging");
+        const file = event.dataTransfer?.files?.[0];
+        if (!file) return;
+        try {
+            status.textContent = "上传图片...";
+            const result = await uploadBridgeImageInput(file, "image");
+            setWidgetValue(node, widgetNames.image, result.name || "");
+            setWidgetValue(node, widgetNames.mask, "");
+            if (enabledWidget) setWidgetValue(node, widgetNames.enabled, true);
+            render();
+        } catch (error) {
+            status.textContent = error?.message || "上传失败";
+        }
+    });
+    const panel = el("div", { class: "webui-bridge-image-input-panel" }, [
+        el("div", { class: "webui-bridge-image-input-head" }, [
+            el("strong", {}, options.title || "WebUI Bridge 图生图"),
+            el("small", {}, options.subtitle || "上传原图，必要时打开涂抹编辑局部 mask"),
+        ]),
+        el("label", { class: "webui-bridge-config-check webui-bridge-image-input-enable" }, [
+            enabledInput,
+            el("span", {}, "启用图生图输入"),
+        ]),
+        preview,
+        el("div", { class: "webui-bridge-image-input-controls" }, [
+            el("button", { type: "button", onclick: () => fileInput.click() }, "上传图片"),
+            el("button", {
+                type: "button",
+                onclick: () => showBridgeMaskEditor(node, normalizeBridgeImageRef(imageWidget?.value), normalizeBridgeImageRef(maskWidget?.value), (_mask, message) => {
+                    status.textContent = message || "";
+                    render();
+                }, widgetNames),
+            }, "涂抹局部"),
+        ]),
+        el("label", {}, [el("span", {}, "模式"), modeSelect]),
+        el("label", { class: "webui-bridge-image-input-denoise" }, [
+            el("span", {}, "Denoise"),
+            denoise,
+            denoiseText,
+        ]),
+        status,
+        fileInput,
+    ]);
+    panel.__webuiBridgeRender = render;
+    render();
+    return panel;
+}
+
+function installBridgeImageInputPanel(node) {
+    if (node.__webuiBridgeImageInputInstalled) {
+        node.__webuiBridgeImageInputPanel?.__webuiBridgeRender?.();
+        return;
+    }
+    node.__webuiBridgeImageInputInstalled = true;
+    for (const widget of node.widgets || []) {
+        if (["image", "mask", "mode", "denoise"].includes(widget?.name)) hideWidget(widget);
+    }
+    const panel = buildBridgeImageInputPanel(node);
+    node.__webuiBridgeImageInputPanel = panel;
+    const desired = [420, 520];
+    node.size = desired;
+    node.setSize?.(desired);
+    if (typeof node.computeSize === "function" && !node.__webuiBridgeImageInputComputeWrapped) {
+        const originalComputeSize = node.computeSize.bind(node);
+        node.computeSize = function (...args) {
+            if (node.__webuiBridgeImageInputSize) return [...node.__webuiBridgeImageInputSize];
+            return originalComputeSize(...args);
+        };
+        node.__webuiBridgeImageInputComputeWrapped = true;
+    }
+    node.__webuiBridgeImageInputSize = desired;
+    const domWidget = node.addDOMWidget("webui_bridge_image_input", "webui_bridge_image_input", panel, {
+        serialize: false,
+        hideOnZoom: false,
+        getMinHeight: () => 420,
+        getMaxHeight: () => 520,
+    });
+    installWidgetSerializationFallback(domWidget, () => null);
+    domWidget.computeSize = () => {
+        panel.style.width = "400px";
+        panel.style.height = "460px";
+        return [400, 460];
+    };
+    node.color = "#31404f";
+    node.bgcolor = "#18212c";
 }
 
 function getAppGraphSafe() {
@@ -5531,6 +5877,11 @@ function buildPanel(node) {
     const moduleFlipEnabledWidget = getWidget(node, "module_flip_enabled");
     const moduleFlipAxisWidget = getWidget(node, "module_flip_axis");
     const modulePresetsEnabledWidget = getWidget(node, "module_presets_enabled");
+    const moduleImg2ImgImageWidget = getWidget(node, "module_img2img_image");
+    const moduleImg2ImgMaskWidget = getWidget(node, "module_img2img_mask");
+    const moduleImg2ImgModeWidget = getWidget(node, "module_img2img_mode");
+    const moduleImg2ImgDenoiseWidget = getWidget(node, "module_img2img_denoise");
+    const moduleImg2ImgEnabledWidget = getWidget(node, "module_img2img_enabled");
     const moduleAdetailerEnabledWidget = getWidget(node, "module_adetailer_enabled");
     const moduleAdetailerModelWidget = getWidget(node, "module_adetailer_model");
     const moduleAdetailerPromptWidget = getWidget(node, "module_adetailer_prompt");
@@ -6251,6 +6602,8 @@ function buildPanel(node) {
             button.disabled = true;
             const oldText = button.textContent;
             button.textContent = "正在安装...";
+            button.classList.add("downloading");
+            setStatus(`正在下载/安装 ${label}...`, { kind: "warning", sticky: true });
             try {
                 const result = await installModuleAssets(assets);
                 state.moduleAssets = result.module_assets || state.moduleAssets;
@@ -6268,6 +6621,7 @@ function buildPanel(node) {
             } finally {
                 button.disabled = false;
                 button.textContent = oldText;
+                button.classList.remove("downloading");
             }
         },
     }, label);
@@ -6514,20 +6868,23 @@ function buildPanel(node) {
         control.addEventListener("change", syncModuleWidgets);
     }
     const moduleSection = (key, title, enabledInput, children) => {
+        const hasToggle = Boolean(enabledInput);
         const body = el("div", { class: "webui-bridge-module-body" }, children);
-        const section = el("details", { class: "webui-bridge-module-section", open: Boolean(enabledInput?.checked) }, [
+        const section = el("details", { class: "webui-bridge-module-section", open: hasToggle ? Boolean(enabledInput.checked) : true }, [
             el("summary", {}, [
                 el("span", {}, title),
-                enabledInput,
-            ]),
+                hasToggle ? enabledInput : el("span", { class: "webui-bridge-module-badge" }, "内置"),
+            ].filter(Boolean)),
             body,
         ]);
         section.dataset.visibilityKey = key;
-        enabledInput.addEventListener("click", (event) => event.stopPropagation());
-        enabledInput.addEventListener("change", () => {
-            section.open = enabledInput.checked || section.open;
-            syncModuleWidgets();
-        });
+        if (hasToggle) {
+            enabledInput.addEventListener("click", (event) => event.stopPropagation());
+            enabledInput.addEventListener("change", () => {
+                section.open = enabledInput.checked || section.open;
+                syncModuleWidgets();
+            });
+        }
         return section;
     };
     const moduleHint = (text) => el("div", { class: "webui-bridge-module-note" }, text);
@@ -6777,6 +7134,50 @@ function buildPanel(node) {
         }
         return false;
     };
+    const findLikelyVaeSource = () => {
+        const candidates = getGraphNodes()
+            .map((graphNode) => {
+                const outputSlot = outputSlotForType(graphNode, "VAE", -1);
+                if (outputSlot < 0) return null;
+                const text = `${graphNode?.type || ""} ${graphNode?.title || ""}`.toLowerCase();
+                let score = 0;
+                if (text.includes("checkpoint") || text.includes("vae")) score += 3;
+                if (outputLinkedTargets(graphNode, outputSlot).length) score += 2;
+                return { graphNode, outputSlot, score };
+            })
+            .filter(Boolean)
+            .sort((a, b) => b.score - a.score);
+        return candidates[0] || null;
+    };
+    const insertImg2ImgIntoMainRoute = (encoderNode, report) => {
+        const sampler = findBridgeDrivenSampler();
+        if (!sampler) {
+            report?.warnings?.push("没有找到当前 Bridge 驱动的 KSampler，请先把 Bridge 的 model/positive/negative 接到采样器。");
+            return false;
+        }
+        const vaeSource = findLikelyVaeSource();
+        if (!vaeSource) {
+            report?.warnings?.push("没有找到可用 VAE 输出；请把 CheckpointLoader/VAELoader 的 VAE 接到 VAE Encode。");
+            return false;
+        }
+        let connected = 0;
+        if (connectGraphSlots(node, "image", encoderNode, "pixels", report)) connected += 1;
+        if (graphSlotIndex(encoderNode, "input", "mask") >= 0 && connectGraphSlots(node, "mask", encoderNode, "mask", report)) connected += 1;
+        if (connectGraphSlotsByIndex(
+            vaeSource.graphNode,
+            vaeSource.outputSlot,
+            encoderNode,
+            graphSlotIndex(encoderNode, "input", "vae"),
+            report,
+            `${graphNodeLabel(vaeSource.graphNode)}.VAE -> ${graphNodeLabel(encoderNode)}.vae`
+        )) connected += 1;
+        const samplerLatentSlot = graphSlotIndex(sampler, "input", "latent_image");
+        rememberInputReplacement(sampler, samplerLatentSlot, report);
+        if (connectGraphSlots(encoderNode, "LATENT", sampler, "latent_image", report, { replace: true })) connected += 1;
+        setNodeWidgetValue(sampler, "denoise", Math.max(0, Math.min(1, normalizeClipStrength(moduleImg2ImgDenoiseWidget?.value ?? 0.55, 0.55))));
+        report.manualHint = `已接入 ${graphNodeLabel(encoderNode)} -> ${graphNodeLabel(sampler)}.latent_image；采样器 denoise 已设为 ${Number(getWidget(sampler, "denoise")?.value ?? 0).toFixed(2)}`;
+        return connected >= 3;
+    };
     const createBridgeModuleGraphNode = (type, title, x, y, report = null) => {
         let graphNode = null;
         try {
@@ -6888,6 +7289,20 @@ function buildPanel(node) {
             if (graphNode) created.push(graphNode);
             return graphNode;
         };
+        if (kind === "img2img") {
+            setWidgetValue(node, "module_img2img_enabled", true);
+            const mode = String(moduleImg2ImgModeWidget?.value || "img2img");
+            const hasMask = Boolean(normalizeBridgeImageRef(moduleImg2ImgMaskWidget?.value));
+            const encoder = mode === "inpaint" || hasMask
+                ? make("VAEEncodeForInpaint", "VAE Encode Inpaint", 0, 0)
+                : make("VAEEncode", "VAE Encode Img2Img", 0, 0);
+            if (encoder && encoder.type === "VAEEncodeForInpaint") setNodeWidgetValue(encoder, "grow_mask_by", 4);
+            if (encoder) insertImg2ImgIntoMainRoute(encoder, report);
+            moduleBuildHistory.push({ kind, label: "图生图 / 局部重绘", created: [...created], replacedLinks: [...report.replacedLinks], moduleControls: moduleControlsSnapshot });
+            updateModuleRestoreButtons();
+            finishModuleGraphBuild(created, "图生图 / 局部重绘", report);
+            return;
+        }
         if (kind === "mask") {
             moduleMaskEnabledInput.checked = true;
             moduleSamEnabledInput.checked = moduleSamEnabledInput.checked || false;
@@ -6999,6 +7414,19 @@ function buildPanel(node) {
         restoreModuleButton(kind),
     ]);
     const regionalModuleSection = el("div", { class: "webui-bridge-modules" }, [
+        moduleSection("module_img2img", "图生图 / 局部重绘", null, [
+            moduleHint("直接在主节点侧栏上传原图；需要局部重绘时打开涂抹编辑，主节点会输出 IMAGE、MASK、denoise 和 mode。"),
+            buildBridgeImageInputPanel(node, {
+                title: "图生图输入",
+                subtitle: "输出在主节点 image / mask 接口，可接 VAE Encode 或 Inpaint Conditioning",
+                imageWidget: "module_img2img_image",
+                maskWidget: "module_img2img_mask",
+                modeWidget: "module_img2img_mode",
+                denoiseWidget: "module_img2img_denoise",
+                enabledWidget: "module_img2img_enabled",
+            }),
+            moduleBuildActions("img2img", "一键接入图生图链路"),
+        ]),
         moduleSection("module_table", "区域表格", moduleTableEnabledInput, [
             moduleHint("启用后后端会记录模块状态；按钮可把表格内容回写为 BREAK 区域文本。"),
             el("button", { class: "webui-bridge-module-button", type: "button", onclick: showRegionalTableAssistant }, "打开表格编辑"),
@@ -7953,6 +8381,7 @@ function buildPanel(node) {
                 }, source.open_url ? "打开" : "本地");
                 const marketSourceMeta = (item) => [
                     item.license,
+                    item.filter_profile,
                     item.limit ? `最多 ${item.limit} 条` : "",
                     item.imported ? `已导入 ${item.imported_count || 0} 条` : "",
                     item.imported_at ? `上次 ${String(item.imported_at).replace("T", " ")}` : "",
@@ -8162,6 +8591,11 @@ function buildPanel(node) {
             { value: "normal", label: "标准" },
             { value: "large", label: "大图" },
         ]);
+        const nodeTutorialPopup = settingSelect(current.node_tutorial_popup, [
+            { value: "first_time", label: "首次添加时弹出" },
+            { value: "always", label: "每次添加都弹出" },
+            { value: "off", label: "不自动弹出" },
+        ]);
         const fontSizeInput = el("input", {
             class: "webui-bridge-config-input",
             type: "number",
@@ -8219,8 +8653,29 @@ function buildPanel(node) {
             title: webuiReady ? "WebUI 配套扩展已存在，不需要下载" : "只补齐 WebUI 中缺失的配套扩展",
         }, webuiReady ? "扩展已存在" : "补齐 WebUI 扩展");
         const close = () => mask.remove();
+        let localAssetsButton = null;
+        const setSettingsStatus = (message, kind = "") => {
+            statusLine.textContent = message || "";
+            statusLine.classList.remove("download-active", "success", "error", "warning");
+            if (kind) statusLine.classList.add(kind);
+        };
+        const setDownloadTargets = (targets, active) => {
+            for (const target of targets.filter(Boolean)) {
+                target.classList.toggle("downloading", active);
+                if ("disabled" in target) target.disabled = active;
+            }
+        };
+        const beginSettingsDownload = (message, targets = []) => {
+            setSettingsStatus(message, "warning");
+            statusLine.classList.add("download-active");
+            setDownloadTargets(targets, true);
+        };
+        const finishSettingsDownload = (message, kind = "", targets = []) => {
+            setSettingsStatus(message, kind);
+            setDownloadTargets(targets, false);
+        };
         const downloadLocalAssets = async () => {
-            statusLine.textContent = "正在下载本地数据包...";
+            beginSettingsDownload("正在下载本地词库，请保持 ComfyUI 运行，不要关闭这个窗口。", [localAssetsButton]);
             try {
                 const result = await installBridgeAssets("local");
                 state.settings = normalizeBridgeSettings(result.settings);
@@ -8230,26 +8685,26 @@ function buildPanel(node) {
                 translationSource.value = state.settings.translation_source;
                 wizardToggle.checked = state.settings.show_startup_wizard;
                 await refreshBridgeData();
-                statusLine.textContent = `${assetInstallMessage(result)}；没有 WebUI 也可以直接使用补全和分类`;
+                finishSettingsDownload(`${assetInstallMessage(result)}；没有 WebUI 也可以直接使用补全和分类`, "success", [localAssetsButton]);
                 setStatus("本地数据包已就绪", { kind: "success" });
             } catch (error) {
-                statusLine.textContent = `下载失败: ${error?.message || error}`;
+                finishSettingsDownload(`下载失败: ${error?.message || error}`, "error", [localAssetsButton]);
             }
         };
         const installWebUIAssetsFromSettings = async () => {
-            statusLine.textContent = "正在检测 WebUI 扩展...";
+            beginSettingsDownload("正在检测并补齐 WebUI 扩展，请等待下载完成。", [installWebUIButton]);
             try {
                 const result = await installBridgeAssets("webui", state.webuiIntegration?.webui_root || "");
                 state.settings = normalizeBridgeSettings(result.settings);
                 state.customTagCount = result.custom_tag_count || state.customTagCount;
                 state.assets = result.assets || state.assets;
                 await refreshBridgeData();
+                finishSettingsDownload(`${assetInstallMessage(result)}；已存在的扩展不会重复下载`, "success", [installWebUIButton]);
                 installWebUIButton.disabled = true;
                 installWebUIButton.textContent = "扩展已存在";
-                statusLine.textContent = `${assetInstallMessage(result)}；已存在的扩展不会重复下载`;
                 setStatus("WebUI 扩展检查完成", { kind: "success" });
             } catch (error) {
-                statusLine.textContent = `检查失败: ${error?.message || error}。没有 WebUI 时请点“下载本地数据包”。`;
+                finishSettingsDownload(`检查失败: ${error?.message || error}。没有 WebUI 时请点“下载本地数据包”。`, "error", [installWebUIButton]);
             }
         };
         const moduleAssetCatalog = [
@@ -8267,25 +8722,27 @@ function buildPanel(node) {
                     button.disabled = true;
                     const oldText = button.textContent;
                     button.textContent = "下载中...";
-                    statusLine.textContent = `正在下载 ${title}...`;
+                    beginSettingsDownload(`正在下载 ${title}，新节点包下载完成后通常需要重启 ComfyUI。`, [button, card]);
                     try {
                         const result = await installModuleAssets([assetKey]);
                         state.moduleAssets = result.module_assets || state.moduleAssets;
                         renderModuleAssetStatuses();
                         const installed = (result.results || []).filter((item) => item.status === "installed").map((item) => item.label || item.id);
                         const existed = (result.results || []).filter((item) => item.status === "exists").map((item) => item.label || item.id);
-                        statusLine.textContent = [
+                        finishSettingsDownload([
                             installed.length ? `已下载 ${installed.join("、")}` : "",
                             existed.length ? `已存在 ${existed.join("、")}` : "",
                             result.restart_required ? "重启 ComfyUI 后生效" : "",
-                        ].filter(Boolean).join("；") || `${title} 已检查`;
+                        ].filter(Boolean).join("；") || `${title} 已检查`, "success", [button, card]);
                         setStatus(statusLine.textContent, { kind: "success", sticky: Boolean(result.restart_required) });
                     } catch (error) {
-                        statusLine.textContent = `${title} 下载失败: ${error?.message || error}`;
+                        finishSettingsDownload(`${title} 下载失败: ${error?.message || error}`, "error", [button, card]);
                         setStatus(statusLine.textContent, { kind: "error", sticky: true });
                     } finally {
                         button.disabled = false;
                         button.textContent = oldText;
+                        button.classList.remove("downloading");
+                        card.classList.remove("downloading");
                     }
                 },
             }, "下载 / 检查");
@@ -8310,18 +8767,19 @@ function buildPanel(node) {
             card.__webuiBridgeRender();
             return card;
         };
+        localAssetsButton = el("button", { type: "button", onclick: downloadLocalAssets }, "下载本地词库");
         const refreshSettingsAssets = async () => {
-            statusLine.textContent = "正在刷新扩展状态...";
+            setSettingsStatus("正在刷新扩展状态...");
             try {
                 state.moduleAssets = await fetchModuleAssets();
                 renderModuleAssetStatuses();
-                statusLine.textContent = "扩展状态已刷新";
+                setSettingsStatus("扩展状态已刷新", "success");
             } catch (error) {
-                statusLine.textContent = `刷新失败: ${error?.message || error}`;
+                setSettingsStatus(`刷新失败: ${error?.message || error}`, "error");
             }
         };
         const save = async () => {
-            statusLine.textContent = "正在保存...";
+            setSettingsStatus("正在保存...");
             try {
                 const result = await saveBridgeSettings({
                     data_source: dataSource.value,
@@ -8330,6 +8788,7 @@ function buildPanel(node) {
                     layout_preset: layoutPreset.value,
                     tag_display: tagDisplay.value,
                     lora_card_size: loraCardSize.value,
+                    node_tutorial_popup: nodeTutorialPopup.value,
                     show_startup_wizard: wizardToggle.checked,
                     ui_visibility: collectVisibilitySettings(),
                 });
@@ -8343,7 +8802,7 @@ function buildPanel(node) {
                 setStatus("设置已保存", { kind: "success" });
                 close();
             } catch (error) {
-                statusLine.textContent = `保存失败: ${error?.message || error}`;
+                setSettingsStatus(`保存失败: ${error?.message || error}`, "error");
             }
         };
         mask.addEventListener("mousedown", (event) => {
@@ -8385,6 +8844,23 @@ function buildPanel(node) {
                             el("span", {}, "首次向导"),
                         ]),
                     ]),
+                    configSection("教程提示", "控制新建 WebUI Prompt Bridge 主节点时是否自动弹出完整教程。", [
+                        el("label", {}, [el("span", {}, "新建节点教程"), nodeTutorialPopup]),
+                        el("div", { class: "webui-bridge-settings-asset-tools" }, [
+                            el("button", { type: "button", onclick: showBridgeTutorialDialog }, "查看完整教程"),
+                            el("button", {
+                                type: "button",
+                                onclick: () => {
+                                    try {
+                                        localStorage.removeItem(NODE_TUTORIAL_SEEN_KEY);
+                                    } catch {
+                                        // Local storage can be unavailable in restricted browser contexts.
+                                    }
+                                    setSettingsStatus("已重置首次教程记录；下次新建节点会再次弹出。", "success");
+                                },
+                            }, "重置首次提示"),
+                        ]),
+                    ]),
                 ]),
                 configSection("侧栏功能显示", "隐藏只影响面板，不删除已有 widget 值，也不会改变工作流执行。", [
                     makeVisibilityGrid(SIDEBAR_VISIBILITY_OPTIONS),
@@ -8398,7 +8874,7 @@ function buildPanel(node) {
                 configSection("扩展与资源下载", "按需逐项下载。已存在的项目会跳过；新节点包通常需要重启 ComfyUI 后生效。", [
                     el("div", { class: "webui-bridge-settings-asset-tools" }, [
                         el("button", { type: "button", onclick: refreshSettingsAssets }, "刷新状态"),
-                        el("button", { type: "button", onclick: downloadLocalAssets }, "下载本地词库"),
+                        localAssetsButton,
                         installWebUIButton,
                     ]),
                     el("div", { class: "webui-bridge-settings-assets" }, moduleAssetCatalog.map((item) => settingsAssetCard(...item))),
@@ -8418,55 +8894,118 @@ function buildPanel(node) {
         refreshSettingsAssets();
     };
 
-    const showBridgeTutorialDialog = () => {
+    const showBridgeTutorialDialog = (options = {}) => {
         const mask = el("div", { class: "webui-bridge-config-mask" });
         const close = () => mask.remove();
+        const tutorialCard = (title, badge, lines) => el("section", {}, [
+            el("div", { class: "webui-bridge-tutorial-card-head" }, [
+                el("h3", {}, title),
+                badge ? el("span", {}, badge) : null,
+            ].filter(Boolean)),
+            el("ul", {}, lines.map((line) => el("li", {}, line))),
+        ]);
+        const tutorialFlow = (items) => el("div", { class: "webui-bridge-tutorial-flow" }, items.map((item, index) => [
+            index ? el("span", { class: "webui-bridge-tutorial-arrow" }, "→") : null,
+            el("b", {}, item),
+        ]).flat().filter(Boolean));
         mask.addEventListener("mousedown", (event) => {
             if (event.target === mask) close();
         });
         mask.append(el("div", { class: "webui-bridge-config-panel webui-bridge-tutorial-panel" }, [
             el("div", { class: "webui-bridge-config-head" }, [
-                el("span", {}, "使用教程"),
+                el("span", {}, options.auto ? "首次使用教程" : "WebUI Prompt Bridge 完整教程"),
                 el("button", { type: "button", onclick: close }, "×"),
             ]),
             el("div", { class: "webui-bridge-config-body" }, [
+                el("div", { class: "webui-bridge-tutorial-hero" }, [
+                    el("b", {}, "先连线，再在节点里完成提示词、LoRA、图生图和局部重绘。"),
+                    el("span", {}, "这个节点的目标是把常用 WebUI 工作流收进一个侧栏；隐藏侧栏后接口会露出来，适合继续连 ComfyUI 节点。"),
+                    tutorialFlow(["WebUI Bridge", "正/负提示词", "LoRA / 模块", "KSampler / 后处理"]),
+                ]),
                 el("div", { class: "webui-bridge-tutorial-grid" }, [
-                    el("section", {}, [
-                        el("h3", {}, "顶部主控"),
-                        el("p", {}, "最上方可以显示或隐藏右侧控制栏、恢复尺寸、拖宽节点、打开设置、查看教程、接入 WebUI、快速添加 LoRA。隐藏侧栏后会露出节点接口，适合连线。"),
+                    tutorialCard("1. 主链路怎么接", "必看", [
+                        "model、clip 输出接后面的 KSampler / CLIP 文本编码链路。",
+                        "positive、negative 是已经编码好的提示词；positive_text、negative_text 是纯文本，方便接其他节点。",
+                        "缺 LoRA 停止、CLIP 强度、模型切换都在顶部或侧栏里控制。",
                     ]),
-                    el("section", {}, [
-                        el("h3", {}, "上下拖拽"),
-                        el("p", {}, "带文字的小横条都能上下拖动，例如 Prompt / 标签、标签 / 反向词、提示词 / LoRA。双击拖拽条会恢复默认高度。"),
+                    tutorialCard("2. 提示词与标签", "常用", [
+                        "左侧写正向和反向提示词，标签区可以搜索、点击、导入和整理。",
+                        "Styles、Prompt 工具、翻译来源可以在设置里打开或切换。",
+                        "分隔条可上下拖动，双击恢复默认高度。",
                     ]),
-                    el("section", {}, [
-                        el("h3", {}, "左右拖拽"),
-                        el("p", {}, "提示词区和右侧控制栏中间的竖条可以左右拖动，用来调节控制栏宽度。隐藏后再点顶部按钮即可显示。"),
+                    tutorialCard("3. LoRA 浏览", "常用", [
+                        "接入 WebUI 或下载本地词库后，LoRA 卡片会显示名称、触发词和强度入口。",
+                        "点卡片会写入提示词，强度会同步到 LoRA 标签。",
+                        "如果模型/LoRA 缺失，可在设置里检查资源状态。",
                     ]),
-                    el("section", {}, [
-                        el("h3", {}, "整体缩放"),
-                        el("p", {}, "节点右下角的蓝色箭头可以拖动，用来同时调整整个节点的宽度和高度。缩放时 LoRA 和分隔条会跟随保底，避免重要入口被挤掉。"),
+                    tutorialCard("4. 图生图 / 局部重绘", "新功能", [
+                        "先在设置里显示“图生图 / 局部重绘”，再在侧栏上传原图。",
+                        "局部重绘要点“涂抹编辑”，红色区域就是 mask。",
+                        "只上传图片不会自动影响 KSampler；请点“一键接入图生图链路”。",
                     ]),
-                    el("section", {}, [
-                        el("h3", {}, "LoRA 区域"),
-                        el("p", {}, "提示词 / LoRA 分隔条和 LoRA 卡片区会保留可见空间。拖到极限时也会留下保底高度，避免找不到恢复入口。"),
+                    tutorialCard("5. 图生图正确链路", "关键", [
+                        "普通图生图：Bridge image → VAE Encode → KSampler latent_image。",
+                        "局部重绘：Bridge image + mask → VAE Encode For Inpaint → KSampler latent_image。",
+                        "denoise 越低越保留原图，越高变化越大；脸部小修通常 0.35-0.65 起步。",
                     ]),
-                    el("section", {}, [
-                        el("h3", {}, "反向提示词"),
-                        el("p", {}, "Negative prompt 可以折叠。折叠后紫色的 标签 / 反向词 拖拽条仍会固定可见，用来重新分配正向标签区和反向区域高度。"),
+                    tutorialCard("6. Mask / ControlNet / 修复模块", "高级", [
+                        "高级模块默认隐藏；在设置里勾选后会出现在侧栏。",
+                        "ControlNet、ADetailer、SAM、放大修复需要对应节点包和模型。",
+                        "设置里的“下载 / 检查”会高亮显示下载状态，下载节点包后通常要重启 ComfyUI。",
                     ]),
-                    el("section", {}, [
-                        el("h3", {}, "布局预设"),
-                        el("p", {}, "默认布局会显示 LoRA。紧凑、宽松、正向、极简等布局会自动贴合底部；手动拖拽后会尊重你的高度，异常挤压时才做保底修正。"),
+                    tutorialCard("7. 布局与显示", "舒服点", [
+                        "顶部“侧栏”按钮可隐藏面板露出接口，适合连线。",
+                        "布局预设能快速切换紧凑、宽松、正向聚焦等模式。",
+                        "右下角蓝色箭头可整体缩放节点。",
+                    ]),
+                    tutorialCard("8. 教程弹出设置", "可控", [
+                        "第一次新建主节点会弹出这份教程；再次新建默认不弹。",
+                        "在“设置 → 教程提示”里可改为每次弹出或不自动弹出。",
+                        "也可以随时点顶部“教程”或设置里的“查看完整教程”。",
                     ]),
                 ]),
-                el("div", { class: "webui-bridge-config-note" }, "如果拖乱了，先找最上方主控条、右下角蓝色箭头和带文字的分隔条；这些位置都专门做了保底可见。"),
+                el("div", { class: "webui-bridge-config-note" }, "图生图最常见的问题：图片已经上传但 KSampler 仍在空 latent 上生成。看到这种情况，先检查 KSampler 的 latent_image 是否已经被 VAE Encode 或 VAE Encode For Inpaint 接管。"),
             ]),
             el("div", { class: "webui-bridge-config-actions" }, [
+                el("button", {
+                    type: "button",
+                    onclick: () => {
+                        close();
+                        showBridgeSettingsDialog();
+                    },
+                }, "打开设置"),
                 el("button", { type: "button", class: "primary", onclick: close }, "知道了"),
             ]),
         ]));
         document.body.append(mask);
+    };
+
+    const hasSeenNodeTutorial = () => {
+        try {
+            return localStorage.getItem(NODE_TUTORIAL_SEEN_KEY) === "1";
+        } catch {
+            return false;
+        }
+    };
+
+    const rememberNodeTutorialSeen = () => {
+        try {
+            localStorage.setItem(NODE_TUTORIAL_SEEN_KEY, "1");
+        } catch {
+            // Ignore storage failures; the setting can still be controlled from the server side.
+        }
+    };
+
+    const maybeShowNodeTutorial = () => {
+        if (!node.__webuiBridgeFreshNode || node.__webuiBridgeWasConfigured) return false;
+        if (node.__webuiBridgeNodeTutorialHandled) return false;
+        const mode = normalizeBridgeSettings(state.settings).node_tutorial_popup;
+        if (mode === "off") return false;
+        if (mode === "first_time" && hasSeenNodeTutorial()) return false;
+        node.__webuiBridgeNodeTutorialHandled = true;
+        if (mode === "first_time") rememberNodeTutorialSeen();
+        window.setTimeout(() => showBridgeTutorialDialog({ auto: true }), 280);
+        return true;
     };
 
     const useBuiltinData = async () => {
@@ -10170,7 +10709,8 @@ function buildPanel(node) {
         }
         positiveTagPanel.__webuiBridgeRender?.();
         negativeTagPanel.__webuiBridgeRender?.();
-        maybeShowStartupWizard();
+        const showedNodeTutorial = maybeShowNodeTutorial();
+        if (!showedNodeTutorial) maybeShowStartupWizard();
     });
 
     renderModelSwitch();
@@ -13088,6 +13628,16 @@ function addStyles() {
             opacity: .58;
             filter: none;
         }
+        .webui-bridge-settings-asset-tools button.downloading,
+        .webui-bridge-settings-asset-card button.downloading,
+        .webui-bridge-module-button.downloading {
+            border-color: #f5bf4f;
+            background: #614719;
+            color: #fff5d6;
+            opacity: 1;
+            box-shadow: 0 0 0 3px rgba(245, 191, 79, .18);
+            animation: webui-bridge-download-pulse 1.1s ease-in-out infinite;
+        }
         .webui-bridge-settings-assets {
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -13103,6 +13653,11 @@ function addStyles() {
             border: 1px solid #2d3d52;
             border-radius: 8px;
             background: #111b29;
+        }
+        .webui-bridge-settings-asset-card.downloading {
+            border-color: #f5bf4f;
+            background: #1f1a10;
+            box-shadow: 0 0 0 3px rgba(245, 191, 79, .14);
         }
         .webui-bridge-settings-asset-card b {
             display: block;
@@ -13145,6 +13700,14 @@ function addStyles() {
         .webui-bridge-module-section summary input {
             width: 18px;
             height: 18px;
+        }
+        .webui-bridge-module-badge {
+            padding: 2px 7px;
+            border: 1px solid #40506a;
+            border-radius: 999px;
+            color: #b6d0ff;
+            font-size: 10px;
+            font-weight: 800;
         }
         .webui-bridge-module-body {
             display: grid;
@@ -13217,6 +13780,9 @@ function addStyles() {
             opacity: .48;
             filter: none;
         }
+        .webui-bridge-module-button.downloading:disabled {
+            opacity: 1;
+        }
         .webui-bridge-settings-panel {
             width: min(1040px, calc(100vw - 48px));
         }
@@ -13259,7 +13825,43 @@ function addStyles() {
             gap: 8px;
         }
         .webui-bridge-tutorial-panel {
-            width: min(820px, calc(100vw - 42px));
+            width: min(1040px, calc(100vw - 42px));
+        }
+        .webui-bridge-tutorial-hero {
+            display: grid;
+            gap: 10px;
+            padding: 16px;
+            border: 1px solid #48658b;
+            border-radius: 8px;
+            background: #162130;
+        }
+        .webui-bridge-tutorial-hero b {
+            color: #ffffff;
+            font-size: 18px;
+            line-height: 1.25;
+        }
+        .webui-bridge-tutorial-hero span {
+            color: #c6d5e8;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+        .webui-bridge-tutorial-flow {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px;
+        }
+        .webui-bridge-tutorial-flow b {
+            padding: 7px 10px;
+            border: 1px solid #5f789f;
+            border-radius: 7px;
+            background: #0f1826;
+            color: #eaf3ff;
+            font-size: 12px;
+        }
+        .webui-bridge-tutorial-arrow {
+            color: #8db7f3;
+            font-weight: 900;
         }
         .webui-bridge-tutorial-grid {
             display: grid;
@@ -13273,17 +13875,41 @@ function addStyles() {
             border-radius: 6px;
             background: linear-gradient(180deg, rgba(23, 34, 50, .98), rgba(14, 20, 31, .98));
         }
+        .webui-bridge-tutorial-card-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 7px;
+        }
+        .webui-bridge-tutorial-card-head span {
+            flex: 0 0 auto;
+            padding: 2px 6px;
+            border: 1px solid #5d779d;
+            border-radius: 999px;
+            background: #101a28;
+            color: #bcd6ff;
+            font-size: 10px;
+            font-weight: 800;
+        }
         .webui-bridge-tutorial-grid h3 {
-            margin: 0 0 6px;
+            margin: 0;
             color: #f2f7ff;
             font-size: 13px;
             line-height: 1.25;
         }
-        .webui-bridge-tutorial-grid p {
+        .webui-bridge-tutorial-grid ul {
             margin: 0;
+            padding-left: 17px;
+        }
+        .webui-bridge-tutorial-grid li {
+            margin: 0 0 5px;
             color: #c6d3e7;
             font-size: 12px;
             line-height: 1.5;
+        }
+        .webui-bridge-tutorial-grid li:last-child {
+            margin-bottom: 0;
         }
         .webui-bridge-prompt-settings .webui-bridge-config-actions {
             grid-template-columns: 1fr;
@@ -13510,6 +14136,179 @@ function addStyles() {
             line-height: 1.45;
             overflow-wrap: anywhere;
         }
+        .webui-bridge-image-input-panel {
+            box-sizing: border-box;
+            display: grid;
+            gap: 10px;
+            width: 100%;
+            height: 100%;
+            padding: 12px;
+            border: 1px solid #31445d;
+            border-radius: 8px;
+            background: #111a26;
+            color: #edf4ff;
+            font-size: 12px;
+            overflow: hidden;
+        }
+        .webui-bridge-image-input-head {
+            display: grid;
+            gap: 2px;
+        }
+        .webui-bridge-image-input-head strong {
+            font-size: 14px;
+        }
+        .webui-bridge-image-input-head small,
+        .webui-bridge-image-input-status {
+            color: #aebed4;
+            line-height: 1.35;
+        }
+        .webui-bridge-image-input-preview {
+            position: relative;
+            display: grid;
+            place-items: center;
+            min-height: 190px;
+            border: 1px dashed #58708e;
+            border-radius: 8px;
+            background: #0b111a;
+            color: #8fa6c4;
+            overflow: hidden;
+        }
+        .webui-bridge-module-body .webui-bridge-image-input-panel {
+            height: auto;
+            padding: 10px;
+            border-color: #2b3a50;
+        }
+        .webui-bridge-module-body .webui-bridge-image-input-preview {
+            min-height: 170px;
+        }
+        .webui-bridge-image-input-preview.dragging {
+            border-color: #79b8ff;
+            background: #122139;
+        }
+        .webui-bridge-image-input-preview.disabled {
+            opacity: .56;
+            filter: grayscale(.45);
+        }
+        .webui-bridge-image-input-enable {
+            padding: 7px 9px;
+            border: 1px solid #2b3a50;
+            border-radius: 7px;
+            background: #0d1622;
+        }
+        .webui-bridge-image-input-preview img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+        .webui-bridge-image-input-preview span {
+            position: absolute;
+            left: 8px;
+            bottom: 8px;
+            padding: 4px 6px;
+            border-radius: 5px;
+            background: rgba(9, 14, 22, .78);
+            color: #e8f2ff;
+            font-weight: 700;
+        }
+        .webui-bridge-image-input-controls {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
+        }
+        .webui-bridge-image-input-controls button,
+        .webui-bridge-image-editor-toolbar button {
+            min-height: 34px;
+            border: 1px solid #40506a;
+            border-radius: 7px;
+            background: #243146;
+            color: #f3f6fb;
+            cursor: pointer;
+            font-weight: 800;
+        }
+        .webui-bridge-image-input-panel label,
+        .webui-bridge-image-editor-toolbar label {
+            display: grid;
+            gap: 5px;
+            min-width: 0;
+            color: #dce8f8;
+            font-weight: 700;
+        }
+        .webui-bridge-image-input-denoise {
+            grid-template-columns: auto minmax(0, 1fr) 42px;
+            align-items: center;
+        }
+        .webui-bridge-image-editor-panel {
+            width: min(1080px, calc(100vw - 48px));
+        }
+        .webui-bridge-image-editor-toolbar {
+            display: grid;
+            grid-template-columns: minmax(180px, 1fr) auto auto;
+            gap: 10px;
+            padding: 14px 18px 0;
+            align-items: end;
+        }
+        .webui-bridge-image-editor-stage {
+            position: relative;
+            margin: 14px auto;
+            border: 1px solid #415777;
+            border-radius: 8px;
+            background: #070b10;
+            overflow: hidden;
+        }
+        .webui-bridge-image-editor-stage canvas {
+            position: absolute;
+            inset: 0;
+            display: block;
+        }
+        .webui-bridge-image-editor-stage canvas + canvas {
+            opacity: .46;
+            mix-blend-mode: screen;
+            filter: drop-shadow(0 0 2px rgba(255, 60, 70, .8));
+        }
+        .webui-bridge-image-editor-cursor {
+            position: absolute;
+            display: none;
+            pointer-events: none;
+            translate: -50% -50%;
+            border: 2px solid #fff4cf;
+            border-radius: 999px;
+            box-shadow: 0 0 0 1px rgba(0, 0, 0, .8);
+        }
+        .webui-bridge-image-editor-cursor.visible {
+            display: block;
+        }
+        .webui-bridge-image-editor-panel .webui-bridge-image-input-status {
+            padding: 0 18px 12px;
+        }
+        .webui-bridge-config-status.download-active,
+        .webui-bridge-config-status.success,
+        .webui-bridge-config-status.error,
+        .webui-bridge-config-status.warning {
+            padding: 10px 12px;
+            border-radius: 7px;
+            font-weight: 800;
+        }
+        .webui-bridge-config-status.download-active,
+        .webui-bridge-config-status.warning {
+            border: 1px solid #f5bf4f;
+            background: rgba(97, 71, 25, .92);
+            color: #fff5d6;
+            box-shadow: 0 0 0 3px rgba(245, 191, 79, .12);
+        }
+        .webui-bridge-config-status.success {
+            border: 1px solid #51c878;
+            background: rgba(24, 75, 45, .86);
+            color: #dcffe7;
+        }
+        .webui-bridge-config-status.error {
+            border: 1px solid #ff6b6b;
+            background: rgba(93, 31, 37, .9);
+            color: #ffe5e5;
+        }
+        @keyframes webui-bridge-download-pulse {
+            0%, 100% { box-shadow: 0 0 0 3px rgba(245, 191, 79, .14); }
+            50% { box-shadow: 0 0 0 5px rgba(245, 191, 79, .28); }
+        }
         .webui-bridge-config-actions {
             display: grid;
             grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -13662,6 +14461,15 @@ app.registerExtension({
     },
     beforeRegisterNodeDef(nodeType, nodeData) {
         installWorkflowLoadSanitizer();
+        if (nodeData.name === IMAGE_INPUT_NODE) {
+            chainCallback(nodeType.prototype, "onNodeCreated", function () {
+                installBridgeImageInputPanel(this);
+            });
+            chainCallback(nodeType.prototype, "onConfigure", function () {
+                installBridgeImageInputPanel(this);
+            });
+            return;
+        }
         if (nodeData.name !== TARGET_NODE) return;
         chainCallback(nodeType.prototype, "onNodeCreated", function () {
             this.color = "#2f3a4a";
