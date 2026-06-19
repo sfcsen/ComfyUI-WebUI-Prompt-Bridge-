@@ -122,7 +122,7 @@ const REGIONAL_HEIGHT_ALIASES = [
     "resize_height",
     "crop_height",
 ];
-const LAYOUT_STORAGE_VERSION = "2026-06-10-corner-resize-lora-v1";
+const LAYOUT_STORAGE_VERSION = "2026-06-20-broken-panel-size-v1";
 const AIO_POSITIVE_MIN_HEIGHT = 180;
 const AIO_NEGATIVE_MIN_HEIGHT = 220;
 const NODE_TUTORIAL_SEEN_KEY = "webui-bridge-node-tutorial-seen-v2";
@@ -552,6 +552,26 @@ function clearLocalValue(key) {
     }
 }
 
+async function readBridgeResponse(response, fallback = "请求失败") {
+    const text = await response.text().catch(() => "");
+    let data = {};
+    if (text) {
+        try {
+            data = JSON.parse(text);
+        } catch {
+            data = {};
+        }
+    }
+    const message = data?.error || data?.message || (text && text !== "Error" ? text : "") || fallback;
+    return { data, message, text };
+}
+
+async function bridgeJson(response, fallback = "请求失败") {
+    const { data, message } = await readBridgeResponse(response, fallback);
+    if (!response.ok) throw new Error(message);
+    return data;
+}
+
 function clampNumber(value, min, max) {
     return Math.min(max, Math.max(min, Number(value) || min));
 }
@@ -901,6 +921,21 @@ function looksLikeAutoExtendedDefaultSize(size) {
     return height > PANEL_MAX_HEIGHT || (defaultOrRoomyWidth && height >= 1450);
 }
 
+function looksLikeBrokenBridgePanelSize(size) {
+    if (!Array.isArray(size)) return true;
+    const width = Number(size[0] || 0);
+    const height = Number(size[1] || 0);
+    if (!Number.isFinite(width) || !Number.isFinite(height)) return true;
+    return width < PANEL_MIN_WIDTH || height < PANEL_MIN_HEIGHT || width > PANEL_MAX_WIDTH || height > PANEL_MAX_HEIGHT;
+}
+
+function normalizeBridgePanelSize(size, fallback = [DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT]) {
+    if (looksLikeBrokenBridgePanelSize(size) || looksLikeAutoExtendedDefaultSize(size)) {
+        return clampPanelSize(fallback[0], fallback[1]);
+    }
+    return clampPanelSize(size[0], size[1]);
+}
+
 function hideWidget(widget) {
     if (!widget || widget.__webuiBridgeHidden) return;
     installWidgetSerializationFallback(widget);
@@ -990,9 +1025,7 @@ async function uploadBridgeImageInput(file, kind = "image") {
         method: "POST",
         body: form,
     });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || "图片上传失败");
-    return data;
+    return bridgeJson(response, "图片上传失败");
 }
 
 function canvasBlob(canvas, filename = "mask.png") {
@@ -1259,6 +1292,9 @@ function buildBridgeImageInputPanel(node, options = {}) {
 
 function installBridgeImageInputPanel(node) {
     if (node.__webuiBridgeImageInputInstalled) {
+        const desired = [420, 520];
+        node.__webuiBridgeImageInputSize = [...desired];
+        node.setSize?.([...desired]);
         node.__webuiBridgeImageInputPanel?.__webuiBridgeRender?.();
         return;
     }
@@ -1269,8 +1305,8 @@ function installBridgeImageInputPanel(node) {
     const panel = buildBridgeImageInputPanel(node);
     node.__webuiBridgeImageInputPanel = panel;
     const desired = [420, 520];
-    node.size = desired;
-    node.setSize?.(desired);
+    node.size = [...desired];
+    node.setSize?.([...desired]);
     if (typeof node.computeSize === "function" && !node.__webuiBridgeImageInputComputeWrapped) {
         const originalComputeSize = node.computeSize.bind(node);
         node.computeSize = function (...args) {
@@ -1279,7 +1315,7 @@ function installBridgeImageInputPanel(node) {
         };
         node.__webuiBridgeImageInputComputeWrapped = true;
     }
-    node.__webuiBridgeImageInputSize = desired;
+    node.__webuiBridgeImageInputSize = [...desired];
     const domWidget = node.addDOMWidget("webui_bridge_image_input", "webui_bridge_image_input", panel, {
         serialize: false,
         hideOnZoom: false,
@@ -3172,6 +3208,10 @@ function sanitizeComfyCorePackageMetadataInWorkflowData(data) {
     const cleanNodes = (nodes) => {
         if (!Array.isArray(nodes)) return;
         for (const nodeData of nodes) {
+            if (nodeData?.type === TARGET_NODE && looksLikeBrokenBridgePanelSize(nodeData.size)) {
+                nodeData.size = clampPanelSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT);
+                changed += 1;
+            }
             const properties = nodeData?.properties;
             if (!properties || String(properties.cnr_id || "") !== "comfy-core") continue;
             delete properties.cnr_id;
@@ -4427,8 +4467,7 @@ async function updateStyle(action, name, positivePrompt = "", negativePrompt = "
             negative_prompt: negativePrompt,
         }),
     });
-    if (!response.ok) throw new Error(await response.text());
-    const data = await response.json();
+    const data = await bridgeJson(response, "样式保存失败");
     return data.styles || [];
 }
 
@@ -4438,8 +4477,7 @@ async function translatePromptAllInOne(text, to = "english") {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text, to, lang: "zh_CN" }),
     });
-    if (!response.ok) throw new Error(await response.text());
-    return await response.json();
+    return await bridgeJson(response, "翻译失败");
 }
 
 async function fetchAutocomplete(query, limit = 10) {
@@ -4466,8 +4504,7 @@ async function fetchLoraUserMetadata(name) {
     const response = await api.fetchApi(`/webui_prompt_bridge/lora_user_metadata?name=${encodeURIComponent(name)}`, {
         cache: "no-store",
     });
-    if (!response.ok) throw new Error(await response.text());
-    return response.json();
+    return bridgeJson(response, "读取 LoRA 备注失败");
 }
 
 async function saveLoraUserMetadata(name, values) {
@@ -4476,8 +4513,7 @@ async function saveLoraUserMetadata(name, values) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name, ...values }),
     });
-    if (!response.ok) throw new Error(await response.text());
-    return response.json();
+    return bridgeJson(response, "保存 LoRA 备注失败");
 }
 
 async function replaceLoraPreview(name, file) {
@@ -4488,16 +4524,15 @@ async function replaceLoraPreview(name, file) {
         method: "POST",
         body: form,
     });
-    if (!response.ok) throw new Error(await response.text());
-    return response.json();
+    return bridgeJson(response, "替换 LoRA 预览图失败");
 }
 
 async function fetchWebUIIntegration() {
     const response = await api.fetchApi("/webui_prompt_bridge/webui_integration", { cache: "no-store" });
     if (!response.ok) {
         if (response.status === 404) throw new Error("后端接口未加载，请重启 ComfyUI 后再打开一键接入");
-        const text = await response.text();
-        throw new Error(text || `读取 WebUI 接入状态失败 (${response.status})`);
+        const { message } = await readBridgeResponse(response, `读取 WebUI 接入状态失败 (${response.status})`);
+        throw new Error(message);
     }
     return response.json();
 }
@@ -4508,16 +4543,10 @@ async function connectWebUIRoot(webuiRoot, autoDetect = false) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ webui_root: webuiRoot, auto_detect: autoDetect }),
     });
-    const text = await response.text();
-    let data = {};
-    try {
-        data = text ? JSON.parse(text) : {};
-    } catch {
-        data = {};
-    }
+    const { data, message, text } = await readBridgeResponse(response, `WebUI 接入失败 (${response.status})，请确认选择的是 WebUI 根目录`);
     if (!response.ok) {
         if (response.status === 404) throw new Error("后端接口未加载，请重启 ComfyUI 后再点一键接入");
-        throw new Error(data.error || text || `WebUI 接入失败 (${response.status})，请确认选择的是 WebUI 根目录`);
+        throw new Error(message || text || `WebUI 接入失败 (${response.status})，请确认选择的是 WebUI 根目录`);
     }
     return data;
 }
@@ -4528,16 +4557,15 @@ async function saveBridgeSettings(settings) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(settings),
     });
-    if (!response.ok) throw new Error(await response.text());
-    return response.json();
+    return bridgeJson(response, "保存设置失败");
 }
 
 async function fetchModuleAssets() {
     const response = await api.fetchApi("/webui_prompt_bridge/module_assets", { cache: "no-store" });
     if (!response.ok) {
         if (response.status === 404) throw new Error("后端接口未加载，请重启 ComfyUI 后读取扩展状态");
-        const text = await response.text();
-        throw new Error(text && text !== "Error" ? text : `扩展状态读取失败 (${response.status})，请确认已重启 ComfyUI`);
+        const { message } = await readBridgeResponse(response, `扩展状态读取失败 (${response.status})，请确认已重启 ComfyUI`);
+        throw new Error(message);
     }
     return response.json();
 }
@@ -4548,16 +4576,15 @@ async function installModuleAssets(assets) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ assets }),
     });
-    const data = await response.json().catch(() => ({}));
+    const { data, message } = await readBridgeResponse(response, "模块节点包安装失败");
     if (response.status === 404) throw new Error("后端接口未加载，请重启 ComfyUI 后再下载扩展");
-    if (!response.ok) throw new Error(data.error || "模块节点包安装失败");
+    if (!response.ok) throw new Error(message);
     return data;
 }
 
 async function fetchAIConfig() {
     const response = await api.fetchApi("/webui_prompt_bridge/ai_config", { cache: "no-store" });
-    if (!response.ok) throw new Error(await response.text());
-    return response.json();
+    return bridgeJson(response, "读取 AI 配置失败");
 }
 
 async function saveAIConfig(config) {
@@ -4568,7 +4595,8 @@ async function saveAIConfig(config) {
     });
     if (!response.ok) {
         if (response.status === 405) throw new Error("后端接口还是旧版本，请重启 ComfyUI 后再保存 AI 配置");
-        throw new Error(await response.text());
+        const { message } = await readBridgeResponse(response, "保存 AI 配置失败");
+        throw new Error(message);
     }
     return response.json();
 }
@@ -4579,9 +4607,7 @@ async function testAIConfig(prompt) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompt }),
     });
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || "AI 接口测试失败");
-    return data;
+    return bridgeJson(response, "AI 接口测试失败");
 }
 
 async function fetchAIModels(config) {
@@ -4590,10 +4616,10 @@ async function fetchAIModels(config) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(config || {}),
     });
-    const data = await response.json().catch(() => ({}));
+    const { data, message } = await readBridgeResponse(response, "模型检测失败");
     if (!response.ok) {
         if (response.status === 405) throw new Error("后端接口还是旧版本，请重启 ComfyUI 后再检测模型");
-        throw new Error(data.error || "模型检测失败");
+        throw new Error(message);
     }
     return data;
 }
@@ -4613,14 +4639,12 @@ async function importBridgeTags(items) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ items }),
     });
-    if (!response.ok) throw new Error(await response.text());
-    return response.json();
+    return bridgeJson(response, "导入失败");
 }
 
 async function fetchCustomTags() {
     const response = await api.fetchApi("/webui_prompt_bridge/custom_tags", { cache: "no-store" });
-    if (!response.ok) throw new Error(await response.text());
-    return response.json();
+    return bridgeJson(response, "读取自定义标签失败");
 }
 
 async function saveCustomTag(index, item) {
@@ -4629,22 +4653,19 @@ async function saveCustomTag(index, item) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ index, item }),
     });
-    if (!response.ok) throw new Error(await response.text());
-    return response.json();
+    return bridgeJson(response, "保存自定义标签失败");
 }
 
 async function deleteCustomTag(index) {
     const response = await api.fetchApi(`/webui_prompt_bridge/custom_tags?index=${encodeURIComponent(index)}`, {
         method: "DELETE",
     });
-    if (!response.ok) throw new Error(await response.text());
-    return response.json();
+    return bridgeJson(response, "删除自定义标签失败");
 }
 
 async function fetchPromptMarketSources() {
     const response = await api.fetchApi("/webui_prompt_bridge/prompt_market", { cache: "no-store" });
-    if (!response.ok) throw new Error(await response.text());
-    return response.json();
+    return bridgeJson(response, "读取提示词市场失败");
 }
 
 async function importPromptMarketSource(sourceId) {
@@ -4653,8 +4674,7 @@ async function importPromptMarketSource(sourceId) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ source_id: sourceId }),
     });
-    if (!response.ok) throw new Error(await response.text());
-    return response.json();
+    return bridgeJson(response, "导入失败");
 }
 
 async function installBridgeAssets(mode, webuiRoot = "") {
@@ -4663,13 +4683,7 @@ async function installBridgeAssets(mode, webuiRoot = "") {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ mode, webui_root: webuiRoot }),
     });
-    const text = await response.text();
-    let data = {};
-    try {
-        data = text ? JSON.parse(text) : {};
-    } catch {
-        data = {};
-    }
+    const { data, text } = await readBridgeResponse(response, "下载失败");
     if (response.status === 404 || response.status === 405) {
         throw new Error("后端安装接口未加载，请重启 ComfyUI 后再试");
     }
@@ -5170,8 +5184,7 @@ async function updatePromptAllInOneStorage(action, kind, prompt = "", name = "",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action, kind, prompt, name, id, lang: "zh_CN" }),
     });
-    if (!response.ok) throw new Error(await response.text());
-    return await response.json();
+    return bridgeJson(response, "更新提示词收藏失败");
 }
 
 function normalizeWebUISampler(name) {
@@ -5714,7 +5727,7 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
     }
 
     const saveActive = () => {
-        localStorage.setItem(storageKey, JSON.stringify({ activeGroup, activeSubGroup }));
+        writeLocalString(storageKey, JSON.stringify({ activeGroup, activeSubGroup }));
     };
 
     const buildGroups = () => {
@@ -6527,7 +6540,7 @@ function buildPanel(node) {
             return [];
         }
     };
-    const writeRegionalPresets = (presets) => localStorage.setItem(regionalPresetStorageKey, JSON.stringify(presets.slice(-30)));
+    const writeRegionalPresets = (presets) => writeLocalString(regionalPresetStorageKey, JSON.stringify(presets.slice(-30)));
     const showPresetModule = () => {
         const list = el("div", { class: "webui-bridge-preset-list" });
         const renderPresets = () => {
@@ -8871,11 +8884,7 @@ function buildPanel(node) {
                             el("button", {
                                 type: "button",
                                 onclick: () => {
-                                    try {
-                                        localStorage.removeItem(NODE_TUTORIAL_SEEN_KEY);
-                                    } catch {
-                                        // Local storage can be unavailable in restricted browser contexts.
-                                    }
+                                    clearLocalValue(NODE_TUTORIAL_SEEN_KEY);
                                     setSettingsStatus("已重置首次教程记录；下次新建节点会再次弹出。", "success");
                                 },
                             }, "重置首次提示"),
@@ -9009,11 +9018,7 @@ function buildPanel(node) {
     };
 
     const rememberNodeTutorialSeen = () => {
-        try {
-            localStorage.setItem(NODE_TUTORIAL_SEEN_KEY, "1");
-        } catch {
-            // Ignore storage failures; the setting can still be controlled from the server side.
-        }
+        writeLocalString(NODE_TUTORIAL_SEEN_KEY, "1");
     };
 
     const maybeShowNodeTutorial = () => {
@@ -9717,6 +9722,8 @@ function buildPanel(node) {
         const desiredHeight = Math.round(Number(node.__webuiBridgeDesiredSize?.[1] || 0));
         if (currentWidth === nextWidth && currentHeight === nextHeight &&
             desiredWidth === nextWidth && desiredHeight === nextHeight) {
+            node.__webuiBridgeApplyDomWidgetSize?.(nextWidth, nextHeight);
+            window.requestAnimationFrame?.(() => panel?.__webuiBridgeScheduleAdaptiveLayout?.());
             return;
         }
         node.__webuiBridgeDesiredSize = [nextWidth, nextHeight];
@@ -9900,7 +9907,13 @@ function buildPanel(node) {
         el("button", { title: "Compact size", onclick: () => setNodeSize(840, 620) }, "S"),
         el("button", { title: "Smaller node", onclick: () => resizeNode(-120, -90) }, "-"),
         el("button", { title: "Larger node", onclick: () => resizeNode(120, 90) }, "+"),
-        el("button", { title: "恢复节点默认尺寸", onclick: () => setNodeSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT) }, "默认尺寸"),
+        el("button", {
+            title: "恢复节点默认尺寸并清理异常布局缓存",
+            onclick: () => {
+                resetNodeLayoutCache();
+                setNodeSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT);
+            },
+        }, "默认尺寸"),
     ]);
     let layoutPresetControls = null;
     const updateLayoutPresetControls = () => {
@@ -10080,11 +10093,51 @@ function buildPanel(node) {
         extraCollapsedKey,
         actionWidthKey,
         "webui-bridge-negative-collapsed",
+        positive.textarea.__webuiBridgeHeightKey,
+        negative.textarea.__webuiBridgeHeightKey,
+        positive.row?.chips?.__webuiBridgeHeightKey,
+        negative.row?.chips?.__webuiBridgeHeightKey,
+        positiveTagPanel?.__webuiBridgeHeightKey,
+        negativeTagPanel?.__webuiBridgeHeightKey,
     ]);
     promptLoraSplitManual = readLocalNumber(topRowHeightKey, null) !== null;
     let extraCollapsed = readLocalBoolean(extraCollapsedKey, false);
     let actionCollapsed = false;
     let loraOverlayOpen = false;
+    const resetNodeLayoutCache = () => {
+        for (const key of [
+            topRowHeightKey,
+            extraHeightKey,
+            extraCollapsedKey,
+            actionWidthKey,
+            "webui-bridge-negative-collapsed",
+            positive.textarea.__webuiBridgeHeightKey,
+            negative.textarea.__webuiBridgeHeightKey,
+            positive.row?.chips?.__webuiBridgeHeightKey,
+            negative.row?.chips?.__webuiBridgeHeightKey,
+            positiveTagPanel?.__webuiBridgeHeightKey,
+            negativeTagPanel?.__webuiBridgeHeightKey,
+        ]) {
+            if (key) clearLocalValue(key);
+        }
+        promptLoraSplitManual = false;
+        promptInnerSplitManual = false;
+        extraCollapsed = false;
+        actionCollapsed = false;
+        resetResizeTargetHeight(topRow, topRowHeightKey);
+        resetResizeTargetHeight(extraSection, extraHeightKey, "1 1 auto");
+        resetResizeTargetHeight(positive.textarea, positive.textarea.__webuiBridgeHeightKey);
+        resetResizeTargetHeight(negative.textarea, negative.textarea.__webuiBridgeHeightKey);
+        resetResizeTargetHeight(positive.row?.chips, positive.row?.chips?.__webuiBridgeHeightKey);
+        resetResizeTargetHeight(negative.row?.chips, negative.row?.chips?.__webuiBridgeHeightKey);
+        resetResizeTargetHeight(positiveTagPanel, positiveTagPanel?.__webuiBridgeHeightKey);
+        resetResizeTargetHeight(negativeTagPanel, negativeTagPanel?.__webuiBridgeHeightKey);
+        resetSidebarWidth(topRow, actionWidthKey, actionWidthOptions);
+        applyTopRowCollapsedState(topRow, false);
+        applyExtraCollapsedState();
+        applyActionCollapsedState();
+        window.requestAnimationFrame?.(() => panel?.__webuiBridgeScheduleAdaptiveLayout?.());
+    };
     const extraBody = el("div", { class: "webui-bridge-extra-body" }, [
         networkTree,
         networkPane,
@@ -10343,7 +10396,10 @@ function buildPanel(node) {
         actionToggle,
         settingsButton,
         tutorialButton,
-        topControlButton("恢复尺寸", "恢复节点默认宽高，避免误点后缩成窄条", () => setNodeSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT)),
+        topControlButton("恢复尺寸", "恢复节点默认宽高并清理异常布局缓存，避免误点后缩成窄条", () => {
+            resetNodeLayoutCache();
+            setNodeSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT);
+        }),
         nodeWidthGrip,
         webuiButton,
         quickLoraOverlayButton,
@@ -10751,6 +10807,7 @@ function buildPanel(node) {
     importUpstreamLoras();
     updateCounters();
     applyUiVisibility();
+    panel.__webuiBridgeResetNodeLayoutCache = resetNodeLayoutCache;
     panel.__webuiBridgeImportUpstreamLoras = () => {
         const added = importUpstreamLoras();
         if (added) updateCounters();
@@ -10767,6 +10824,13 @@ function installWebUIPanel(node) {
             node.__webuiBridgePanel.querySelector?.(".webui-bridge-toprow, .webui-bridge-panel-error");
         if (usablePanel) {
             node.__webuiBridgePanel.style.display = "";
+            const desired = normalizeBridgePanelSize(node.__webuiBridgeDesiredSize || node.size);
+            node.__webuiBridgeDesiredSize = desired;
+            node.__webuiBridgeApplyDomWidgetSize?.(desired[0], desired[1]);
+            if (looksLikeBrokenBridgePanelSize(node.size)) {
+                node.__webuiBridgePanel.__webuiBridgeResetNodeLayoutCache?.();
+            }
+            window.requestAnimationFrame?.(() => node.__webuiBridgePanel?.__webuiBridgeScheduleAdaptiveLayout?.());
             return;
         }
         node.__webuiBridgePanel.__webuiBridgeSidebarResizeObserver?.disconnect?.();
@@ -10785,10 +10849,13 @@ function installWebUIPanel(node) {
                 const desiredHeight = Math.round(Number(node.__webuiBridgeDesiredSize?.[1] || 0));
                 if (currentWidth === clamped[0] && currentHeight === clamped[1] &&
                     desiredWidth === clamped[0] && desiredHeight === clamped[1]) {
+                    node.__webuiBridgeApplyDomWidgetSize?.(clamped[0], clamped[1]);
+                    window.requestAnimationFrame?.(() => node.__webuiBridgePanel?.__webuiBridgeScheduleAdaptiveLayout?.());
                     return node;
                 }
                 node.__webuiBridgeDesiredSize = clamped;
                 const result = originalSetSize(clamped);
+                node.__webuiBridgeApplyDomWidgetSize?.(clamped[0], clamped[1]);
                 window.requestAnimationFrame?.(() => node.__webuiBridgePanel?.__webuiBridgeScheduleAdaptiveLayout?.());
                 return result;
             }
@@ -10797,6 +10864,7 @@ function installWebUIPanel(node) {
         node.__webuiBridgeSetSizeWrapped = true;
     }
     hideNativeWidgets(node);
+    const hadBrokenPanelSize = looksLikeBrokenBridgePanelSize(node.size);
     let panel = null;
     try {
         panel = buildPanel(node);
@@ -10822,7 +10890,10 @@ function installWebUIPanel(node) {
         });
         node.__webuiBridgeSerializeWrapped = true;
     }
-    if (looksLikeAutoExtendedDefaultSize(node.__webuiBridgeDesiredSize) || looksLikeAutoExtendedDefaultSize(node.size)) {
+    if ((node.__webuiBridgeDesiredSize && looksLikeBrokenBridgePanelSize(node.__webuiBridgeDesiredSize)) ||
+        looksLikeBrokenBridgePanelSize(node.size) ||
+        looksLikeAutoExtendedDefaultSize(node.__webuiBridgeDesiredSize) ||
+        looksLikeAutoExtendedDefaultSize(node.size)) {
         node.__webuiBridgeDesiredSize = clampPanelSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT);
         node.setSize(node.__webuiBridgeDesiredSize);
     }
@@ -10831,7 +10902,7 @@ function installWebUIPanel(node) {
             ? clampPanelSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT)
             : looksLikeLegacyDefaultSize(node.size)
                 ? clampPanelSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT)
-            : looksLikeAutoExtendedDefaultSize(node.size)
+            : looksLikeBrokenBridgePanelSize(node.size) || looksLikeAutoExtendedDefaultSize(node.size)
                 ? clampPanelSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT)
             : clampPanelSize(
                 Math.max(node.size?.[0] || DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_WIDTH),
@@ -10874,6 +10945,7 @@ function installWebUIPanel(node) {
         panel.style.height = `${widgetHeight}px`;
         return [widgetWidth, widgetHeight];
     };
+    node.__webuiBridgeApplyDomWidgetSize = applyDomWidgetSize;
     domWidget.computeSize = (width) => {
         const desired = node.__webuiBridgeDesiredSize || node.size || [width || 1040, 820];
         const nodeWidth = desired[0] || width || 1040;
@@ -10884,6 +10956,9 @@ function installWebUIPanel(node) {
     applyDomWidgetSize(node.__webuiBridgeDesiredSize[0], node.__webuiBridgeDesiredSize[1]);
     node.__webuiBridgePanel = panel;
     node.resizable = true;
+    if (hadBrokenPanelSize) {
+        window.requestAnimationFrame?.(() => panel.__webuiBridgeResetNodeLayoutCache?.());
+    }
     if (node.__webuiBridgeFreshNode && !node.__webuiBridgeWasConfigured && !node.__webuiBridgeFreshSizeApplied) {
         node.__webuiBridgeDesiredSize = clampPanelSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT);
         node.__webuiBridgeFreshSizeApplied = true;

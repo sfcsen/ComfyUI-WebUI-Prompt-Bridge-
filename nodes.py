@@ -14,7 +14,7 @@ import uuid
 import urllib.request
 import zipfile
 from pathlib import Path
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlparse
 
 import comfy.sd
 import comfy.samplers
@@ -954,18 +954,38 @@ def _read_text_if_exists(path):
     return ""
 
 
+def _normalize_request_host(value):
+    raw = str(value or "").split(",", 1)[0].strip()
+    if not raw:
+        return "", None
+    parsed = urlparse(raw if "://" in raw else f"//{raw}", scheme="http")
+    host = (parsed.hostname or "").strip().lower()
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    return host, port
+
+
+def _hosts_same_origin(request_host, request_port, source_host, source_port):
+    if not request_host or not source_host:
+        return False
+    if request_host == source_host and request_port == source_port:
+        return True
+    loopback_hosts = {"localhost", "127.0.0.1", "::1"}
+    return request_host in loopback_hosts and source_host in loopback_hosts and request_port == source_port
+
+
 def _validate_same_origin_request(request):
-    host = request.headers.get("Host", "").split(",", 1)[0].strip().lower()
+    host, port = _normalize_request_host(request.headers.get("Host", ""))
     if not host:
         return True
     for header in ("Origin", "Referer"):
         value = request.headers.get(header, "")
         if not value:
             continue
-        match = re.match(r"^https?://([^/]+)", value, flags=re.IGNORECASE)
-        if not match:
-            return False
-        if match.group(1).lower() != host:
+        source_host, source_port = _normalize_request_host(value)
+        if not _hosts_same_origin(host, port, source_host, source_port):
             return False
     return True
 
