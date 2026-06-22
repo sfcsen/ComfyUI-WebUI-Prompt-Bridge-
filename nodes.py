@@ -3672,6 +3672,172 @@ def _bounded_int(value, default, min_value=None, max_value=None):
     return number
 
 
+def _bridge_number(value):
+    if value is None or value == "":
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number and number not in (float("inf"), float("-inf")) else None
+
+
+def _bridge_number_in_range(value, min_value, max_value):
+    number = _bridge_number(value)
+    return number is not None and min_value <= number <= max_value
+
+
+def _bridge_looks_like_scale(value):
+    return _bridge_number_in_range(value, 1, 8)
+
+
+def _bridge_looks_like_steps(value):
+    return _bridge_number_in_range(value, 0, 150)
+
+
+def _bridge_looks_like_denoise(value):
+    return _bridge_number_in_range(value, 0, 1)
+
+
+def _bridge_looks_like_tile(value):
+    return _bridge_number_in_range(value, 128, 16384)
+
+
+def _bridge_looks_like_overlap(value):
+    return _bridge_number_in_range(value, 0, 1024)
+
+
+def _bridge_looks_like_boolean(value):
+    if isinstance(value, bool):
+        return True
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value in (0, 1)
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "false", "0", "1", "on", "off", "yes", "no"}
+    return False
+
+
+def _bridge_bool(value, default=False):
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "false", "0", "off", "no"}
+    return bool(value)
+
+
+def _bridge_legacy_denoise(value):
+    number = _bridge_number(value)
+    if number is not None and 0 < number <= 1:
+        return number
+    return 0.48
+
+
+def _repair_legacy_upscale_widget_shift(
+    module_upscale_by,
+    module_upscale_upscaler,
+    module_upscale_steps,
+    module_upscale_denoise,
+    module_upscale_tile_width,
+    module_upscale_tile_height,
+    module_upscale_overlap,
+    module_regional_lora_enabled,
+):
+    by_looks_like_steps = _bridge_looks_like_steps(module_upscale_by) and not _bridge_looks_like_scale(module_upscale_by)
+    upscaler_looks_like_scale = _bridge_looks_like_scale(module_upscale_upscaler)
+    upscaler_looks_like_steps = _bridge_looks_like_steps(module_upscale_upscaler)
+
+    if (
+        by_looks_like_steps
+        and upscaler_looks_like_scale
+        and _bridge_looks_like_tile(module_upscale_steps)
+        and _bridge_looks_like_tile(module_upscale_denoise)
+        and _bridge_looks_like_overlap(module_upscale_tile_width)
+        and _bridge_looks_like_boolean(module_upscale_tile_height)
+    ):
+        return (
+            module_upscale_upscaler,
+            "nearest-exact",
+            module_upscale_by,
+            0.48,
+            module_upscale_steps,
+            module_upscale_denoise,
+            module_upscale_tile_width,
+            _bridge_bool(module_upscale_tile_height),
+        )
+
+    if (
+        by_looks_like_steps
+        and upscaler_looks_like_scale
+        and _bridge_looks_like_denoise(module_upscale_steps)
+        and _bridge_looks_like_tile(module_upscale_denoise)
+        and _bridge_looks_like_tile(module_upscale_tile_width)
+        and _bridge_looks_like_overlap(module_upscale_tile_height)
+    ):
+        return (
+            module_upscale_upscaler,
+            "nearest-exact",
+            module_upscale_by,
+            _bridge_legacy_denoise(module_upscale_steps),
+            module_upscale_denoise,
+            module_upscale_tile_width,
+            module_upscale_tile_height,
+            _bridge_bool(module_upscale_overlap),
+        )
+
+    if (
+        _bridge_looks_like_scale(module_upscale_by)
+        and upscaler_looks_like_steps
+        and _bridge_looks_like_denoise(module_upscale_steps)
+        and _bridge_looks_like_tile(module_upscale_denoise)
+        and _bridge_looks_like_tile(module_upscale_tile_width)
+        and _bridge_looks_like_overlap(module_upscale_tile_height)
+    ):
+        return (
+            module_upscale_by,
+            "nearest-exact",
+            module_upscale_upscaler,
+            _bridge_legacy_denoise(module_upscale_steps),
+            module_upscale_denoise,
+            module_upscale_tile_width,
+            module_upscale_tile_height,
+            _bridge_bool(module_upscale_overlap),
+        )
+
+    if (
+        _bridge_looks_like_scale(module_upscale_by)
+        and upscaler_looks_like_steps
+        and _bridge_looks_like_tile(module_upscale_steps)
+        and _bridge_looks_like_tile(module_upscale_denoise)
+        and _bridge_looks_like_overlap(module_upscale_tile_width)
+        and _bridge_looks_like_boolean(module_upscale_tile_height)
+    ):
+        return (
+            module_upscale_by,
+            "nearest-exact",
+            module_upscale_upscaler,
+            0.48,
+            module_upscale_steps,
+            module_upscale_denoise,
+            module_upscale_tile_width,
+            _bridge_bool(module_upscale_tile_height),
+        )
+
+    return (
+        module_upscale_by,
+        module_upscale_upscaler,
+        module_upscale_steps,
+        module_upscale_denoise,
+        module_upscale_tile_width,
+        module_upscale_tile_height,
+        module_upscale_overlap,
+        module_regional_lora_enabled,
+    )
+
+
 def _apply_negative_common_prompt(negative_text, common_prompt):
     common_prompt = str(common_prompt or "").strip()
     if not common_prompt:
@@ -3894,6 +4060,20 @@ class WebUIPromptBridge:
             },
         }
 
+    @classmethod
+    def VALIDATE_INPUTS(
+        cls,
+        module_upscale_by=None,
+        module_upscale_upscaler=None,
+        module_upscale_steps=None,
+        module_upscale_denoise=None,
+        module_upscale_tile_width=None,
+        module_upscale_tile_height=None,
+        module_upscale_overlap=None,
+        module_regional_lora_enabled=None,
+    ):
+        return True
+
     def _load_lora(self, lora_name):
         lora_path = folder_paths.get_full_path_or_raise("loras", lora_name)
         cached = self.loaded_loras.get(lora_path)
@@ -3982,6 +4162,25 @@ class WebUIPromptBridge:
             default_clip_strength = 1.0
         module_img2img_image = _coerce_bridge_image_ref(module_img2img_image)
         module_img2img_mask = _coerce_bridge_image_ref(module_img2img_mask)
+        (
+            module_upscale_by,
+            module_upscale_upscaler,
+            module_upscale_steps,
+            module_upscale_denoise,
+            module_upscale_tile_width,
+            module_upscale_tile_height,
+            module_upscale_overlap,
+            module_regional_lora_enabled,
+        ) = _repair_legacy_upscale_widget_shift(
+            module_upscale_by,
+            module_upscale_upscaler,
+            module_upscale_steps,
+            module_upscale_denoise,
+            module_upscale_tile_width,
+            module_upscale_tile_height,
+            module_upscale_overlap,
+            module_regional_lora_enabled,
+        )
 
         positive_text, positive_loras = _parse_lora_tags(positive_prompt)
         negative_text, negative_loras = _parse_lora_tags(negative_prompt)

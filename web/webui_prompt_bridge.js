@@ -77,6 +77,19 @@ const PROMPT_WIDGET_NAMES = BRIDGE_WIDGET_DEFINITIONS.map(([name]) => name);
 const PROMPT_WIDGETS = new Set(PROMPT_WIDGET_NAMES);
 const BRIDGE_WIDGET_DEFAULTS = Object.fromEntries(BRIDGE_WIDGET_DEFINITIONS.map(([name, , fallback]) => [name, fallback]));
 const BRIDGE_WIDGET_DEFINITION_BY_NAME = Object.fromEntries(BRIDGE_WIDGET_DEFINITIONS.map((definition) => [definition[0], definition]));
+const BRIDGE_WIDGET_INDEX_BY_NAME = Object.fromEntries(PROMPT_WIDGET_NAMES.map((name, index) => [name, index]));
+const BRIDGE_UPSCALE_WIDGET_INDEXES = {
+    enabled: BRIDGE_WIDGET_INDEX_BY_NAME.module_upscale_enabled,
+    mode: BRIDGE_WIDGET_INDEX_BY_NAME.module_upscale_mode,
+    by: BRIDGE_WIDGET_INDEX_BY_NAME.module_upscale_by,
+    upscaler: BRIDGE_WIDGET_INDEX_BY_NAME.module_upscale_upscaler,
+    steps: BRIDGE_WIDGET_INDEX_BY_NAME.module_upscale_steps,
+    denoise: BRIDGE_WIDGET_INDEX_BY_NAME.module_upscale_denoise,
+    tileWidth: BRIDGE_WIDGET_INDEX_BY_NAME.module_upscale_tile_width,
+    tileHeight: BRIDGE_WIDGET_INDEX_BY_NAME.module_upscale_tile_height,
+    overlap: BRIDGE_WIDGET_INDEX_BY_NAME.module_upscale_overlap,
+    regionalLora: BRIDGE_WIDGET_INDEX_BY_NAME.module_regional_lora_enabled,
+};
 const EXTRA_SEPARATOR = ", ";
 const ATTENTION_STEP = 0.1;
 const EXTRA_STEP = 0.05;
@@ -1084,6 +1097,9 @@ function hideWidget(widget) {
 
 function removeBridgeDomWidgets(node) {
     if (!Array.isArray(node.widgets)) return false;
+    node.__webuiBridgePanel?.__webuiBridgeShellGuard?.resizeObserver?.disconnect?.();
+    node.__webuiBridgePanel?.__webuiBridgeShellGuard?.mutationObserver?.disconnect?.();
+    node.__webuiBridgePanel?.__webuiBridgeSidebarResizeObserver?.disconnect?.();
     let removed = false;
     for (const widget of node.widgets) {
         if (widget?.name !== "webui_prompt_frontend") continue;
@@ -1118,8 +1134,20 @@ function pinBridgeDomWidgetToTop(node, widget) {
 
 function syncBridgeDomWidgetWrapper(panel, width, height) {
     if (!panel?.parentElement) return;
-    const setImportant = (target, property, value) => target?.style?.setProperty?.(property, value, "important");
-    const clearImportant = (target, property) => target?.style?.removeProperty?.(property);
+    const setImportant = (target, property, value) => {
+        if (!target?.style) return;
+        if (target.style.getPropertyValue(property) === value &&
+            target.style.getPropertyPriority(property) === "important") return;
+        target.style.setProperty(property, value, "important");
+    };
+    const clearImportant = (target, property) => {
+        if (!target?.style || !target.style.getPropertyValue(property)) return;
+        target.style.removeProperty(property);
+    };
+    const wrapperWidth = Math.max(PANEL_MIN_WIDTH, Number(width) || panel.offsetWidth || DEFAULT_PANEL_WIDTH);
+    const wrapperHeight = Math.max(280, Number(height) || panel.offsetHeight || DEFAULT_PANEL_HEIGHT);
+    panel.__webuiBridgeExpectedWidgetSize = [wrapperWidth, wrapperHeight];
+    panel.__webuiBridgeShellSyncing = true;
     const clearGlobalShell = (root) => {
         if (!root ||
             root.classList?.contains("dom-widget") ||
@@ -1166,8 +1194,6 @@ function syncBridgeDomWidgetWrapper(panel, width, height) {
         setImportant(host, "height", "auto");
         setImportant(host, "position", "absolute");
     }
-    const wrapperWidth = Math.max(PANEL_MIN_WIDTH, Number(width) || panel.offsetWidth || DEFAULT_PANEL_WIDTH);
-    const wrapperHeight = Math.max(280, Number(height) || panel.offsetHeight || DEFAULT_PANEL_HEIGHT);
     if (!host && roots[0]) {
         setImportant(roots[0], "width", `${wrapperWidth}px`);
         setImportant(roots[0], "height", `${wrapperHeight}px`);
@@ -1181,23 +1207,107 @@ function syncBridgeDomWidgetWrapper(panel, width, height) {
     setImportant(panel, "max-width", "100%");
     setImportant(panel, "height", "100%");
     setImportant(panel, "max-height", "100%");
+    installBridgeDomWidgetShellGuard(panel, roots[0] || panel.parentElement);
+    const releaseShellSync = () => {
+        if (panel) panel.__webuiBridgeShellSyncing = false;
+    };
+    if (typeof queueMicrotask === "function") queueMicrotask(releaseShellSync);
+    else window.setTimeout?.(releaseShellSync, 0);
 }
 
-function bridgeScrollableWheelTarget(target, deltaY = 0) {
+function bridgeDomWidgetShellNeedsSync(panel, root) {
+    const expected = panel?.__webuiBridgeExpectedWidgetSize;
+    if (!panel?.isConnected || !root?.isConnected || !Array.isArray(expected)) return false;
+    const [expectedWidth, expectedHeight] = expected;
+    if (!Number.isFinite(expectedWidth) || !Number.isFinite(expectedHeight)) return false;
+    const width = root.offsetWidth || panel.offsetWidth || 0;
+    const height = root.offsetHeight || panel.offsetHeight || 0;
+    return Math.abs(width - expectedWidth) > 3 || Math.abs(height - expectedHeight) > 3;
+}
+
+function syncBridgeDomWidgetShellSoon(panel, { immediate = false } = {}) {
+    const expected = panel?.__webuiBridgeExpectedWidgetSize;
+    if (!Array.isArray(expected)) return;
+    const run = () => {
+        panel.__webuiBridgeShellSyncScheduled = false;
+        if (!panel?.isConnected) return;
+        syncBridgeDomWidgetWrapper(panel, expected[0], expected[1]);
+        panel.__webuiBridgeScheduleAdaptiveLayout?.();
+    };
+    if (immediate) {
+        run();
+        return;
+    }
+    if (panel.__webuiBridgeShellSyncScheduled) return;
+    panel.__webuiBridgeShellSyncScheduled = true;
+    if (typeof window.requestAnimationFrame === "function") {
+        window.requestAnimationFrame(run);
+    } else {
+        window.setTimeout?.(run, 0);
+    }
+}
+
+function installBridgeDomWidgetShellGuard(panel, root) {
+    if (!panel || !root) return;
+    const currentGuard = panel.__webuiBridgeShellGuard;
+    if (currentGuard?.root === root) return;
+    currentGuard?.resizeObserver?.disconnect?.();
+    currentGuard?.mutationObserver?.disconnect?.();
+    const check = (options = {}) => {
+        if (panel.__webuiBridgeShellSyncing) return;
+        if (bridgeDomWidgetShellNeedsSync(panel, root)) {
+            syncBridgeDomWidgetShellSoon(panel, options);
+        }
+    };
+    const mutationObserver = typeof MutationObserver !== "undefined"
+        ? new MutationObserver(() => check({ immediate: true }))
+        : null;
+    const resizeObserver = typeof ResizeObserver !== "undefined"
+        ? new ResizeObserver(() => check())
+        : null;
+    mutationObserver?.observe?.(root, { attributes: true, attributeFilter: ["style", "class"] });
+    if (panel !== root) {
+        mutationObserver?.observe?.(panel, { attributes: true, attributeFilter: ["style", "class"] });
+    }
+    resizeObserver?.observe?.(root);
+    if (panel !== root) resizeObserver?.observe?.(panel);
+    panel.__webuiBridgeShellGuard = { root, mutationObserver, resizeObserver };
+}
+
+function bridgeScrollableWheelTarget(target, deltaY = 0, deltaX = 0) {
     let current = target instanceof Element ? target : target?.parentElement;
     while (current && current !== document.body) {
         if (current.classList?.contains("webui-bridge-panel")) return null;
         const style = getComputedStyle(current);
         const overflowY = `${style.overflowY} ${style.overflow}`.toLowerCase();
+        const overflowX = `${style.overflowX} ${style.overflow}`.toLowerCase();
         const canScrollY = /(auto|scroll|overlay)/.test(overflowY) && current.scrollHeight > current.clientHeight + 2;
+        const canScrollX = /(auto|scroll|overlay)/.test(overflowX) && current.scrollWidth > current.clientWidth + 2;
         if (canScrollY) {
             const canScrollDown = current.scrollTop + current.clientHeight < current.scrollHeight - 1;
             const canScrollUp = current.scrollTop > 0;
             if ((deltaY > 0 && canScrollDown) || (deltaY < 0 && canScrollUp)) return current;
         }
+        if (canScrollX) {
+            const canScrollRight = current.scrollLeft + current.clientWidth < current.scrollWidth - 1;
+            const canScrollLeft = current.scrollLeft > 0;
+            if ((deltaX > 0 && canScrollRight) || (deltaX < 0 && canScrollLeft)) return current;
+        }
         current = current.parentElement;
     }
     return null;
+}
+
+function bridgeWheelDefaultTarget(target) {
+    if (!(target instanceof Element)) return null;
+    const localTarget = target.closest?.([
+        "input[type='number']",
+        "input[type='range']",
+        "select",
+        "textarea",
+    ].join(","));
+    const panel = target.closest?.(".webui-bridge-panel");
+    return localTarget && panel?.contains(localTarget) ? localTarget : null;
 }
 
 function bridgeCanvasHasPendingNodePlacement() {
@@ -1436,45 +1546,6 @@ function stopBridgeCanvasOwnedPointer(event) {
     event.stopImmediatePropagation?.();
 }
 
-function cloneBridgeCanvasWheelEvent(event) {
-    return new WheelEvent(event.type, {
-        bubbles: true,
-        cancelable: true,
-        composed: true,
-        deltaX: event.deltaX,
-        deltaY: event.deltaY,
-        deltaZ: event.deltaZ,
-        deltaMode: event.deltaMode,
-        clientX: event.clientX,
-        clientY: event.clientY,
-        screenX: event.screenX,
-        screenY: event.screenY,
-        ctrlKey: event.ctrlKey,
-        shiftKey: event.shiftKey,
-        altKey: event.altKey,
-        metaKey: event.metaKey,
-        button: event.button,
-        buttons: event.buttons,
-    });
-}
-
-function forwardBridgeCanvasWheel(event) {
-    const canvas = app?.canvas;
-    const canvasElement = canvas?.canvas || document.querySelector("canvas");
-    if (!canvasElement || event.__webuiBridgeForwardedWheel) return false;
-    const forwarded = cloneBridgeCanvasWheelEvent(event);
-    Object.defineProperty(forwarded, "__webuiBridgeForwardedWheel", { value: true });
-    if (typeof canvas?.processMouseWheel === "function") {
-        try {
-            canvas.processMouseWheel(forwarded);
-            return true;
-        } catch (error) {
-            console.warn("[WebUI Prompt Bridge] Failed to forward wheel to ComfyUI canvas", error);
-        }
-    }
-    return canvasElement.dispatchEvent(forwarded);
-}
-
 function installBridgeDocumentCanvasPointerCapture(handleSelector) {
     if (document.__webuiBridgeDocumentCanvasPointerCaptureInstalled) return;
     document.__webuiBridgeDocumentCanvasPointerCaptureInstalled = true;
@@ -1546,13 +1617,15 @@ function installBridgePanelCanvasEventGuards(panel) {
     panel.addEventListener("dblclick", stopCanvasPointer);
     panel.addEventListener("contextmenu", stopCanvasPointer);
     panel.addEventListener("wheel", (event) => {
-        if (event.defaultPrevented || bridgeScrollableWheelTarget(event.target, event.deltaY)) {
+        if (event.defaultPrevented ||
+            bridgeScrollableWheelTarget(event.target, event.deltaY, event.deltaX) ||
+            bridgeWheelDefaultTarget(event.target)) {
             event.stopPropagation();
             return;
         }
-        if (!forwardBridgeCanvasWheel(event)) return;
         event.preventDefault();
         event.stopPropagation();
+        event.stopImmediatePropagation?.();
     }, { passive: false });
 }
 
@@ -1978,9 +2051,13 @@ function getAppGraphSafe() {
     }
 }
 
+function isBridgeGraphConfiguring() {
+    return Number(app.configuringGraphLevel || 0) > 0;
+}
+
 function scheduleBridgePanelInstall(node) {
     if (node.__webuiBridgeInstallScheduled) return;
-    if (node.__webuiBridgeFreshNode && !node.__webuiBridgeWasConfigured) {
+    if (node.__webuiBridgeFreshNode && !node.__webuiBridgeWasConfigured && !isBridgeGraphConfiguring()) {
         node.__webuiBridgeInstallScheduled = true;
         try {
             installWebUIPanel(node);
@@ -2061,6 +2138,226 @@ function sameBridgeWidgetValue(a, b) {
     return a === b || (Number.isNaN(a) && Number.isNaN(b));
 }
 
+function finiteBridgeNumber(value) {
+    if (value === undefined || value === null || value === "") return null;
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : null;
+}
+
+function bridgeNumberInRange(value, min, max) {
+    const numeric = finiteBridgeNumber(value);
+    return numeric !== null && numeric >= min && numeric <= max;
+}
+
+function bridgeLooksLikeScale(value) {
+    return bridgeNumberInRange(value, 1, 8);
+}
+
+function bridgeLooksLikeSteps(value) {
+    return bridgeNumberInRange(value, 0, 150);
+}
+
+function bridgeLooksLikeDenoise(value) {
+    return bridgeNumberInRange(value, 0, 1);
+}
+
+function bridgeLooksLikeTile(value) {
+    return bridgeNumberInRange(value, 128, 16384);
+}
+
+function bridgeLooksLikeOverlap(value) {
+    return bridgeNumberInRange(value, 0, 1024);
+}
+
+function bridgeLooksLikeBoolean(value) {
+    if (typeof value === "boolean") return true;
+    if (typeof value === "number") return value === 0 || value === 1;
+    if (typeof value === "string") return /^(true|false|0|1|on|off|yes|no)$/i.test(value.trim());
+    return false;
+}
+
+function bridgeLooksLikeNonNumericText(value) {
+    return typeof value === "string" && value.trim() !== "" && finiteBridgeNumber(value) === null;
+}
+
+function bridgeLooksLikeUpscaleMode(value) {
+    const choices = BRIDGE_WIDGET_DEFINITION_BY_NAME.module_upscale_mode?.[3] || [];
+    return choices.includes(String(value));
+}
+
+function assignMigratedBridgeWidget(next, changedRef, values, name, value) {
+    const index = BRIDGE_WIDGET_INDEX_BY_NAME[name];
+    if (index === undefined) return;
+    const fallback = BRIDGE_WIDGET_DEFAULTS[name];
+    const repaired = sanitizeBridgeWidgetValue(name, value === undefined ? fallback : value);
+    next[index] = repaired;
+    if (!sameBridgeWidgetValue(values[index], repaired)) changedRef.changed = true;
+}
+
+function applyLegacyUpscaleMigration(values, next, fields) {
+    const changedRef = { changed: false };
+    const fallbackUpscaler = bridgeLooksLikeNonNumericText(fields.upscaler)
+        ? fields.upscaler
+        : BRIDGE_WIDGET_DEFAULTS.module_upscale_upscaler;
+    assignMigratedBridgeWidget(next, changedRef, values, "module_upscale_by", fields.by);
+    assignMigratedBridgeWidget(next, changedRef, values, "module_upscale_upscaler", fallbackUpscaler);
+    assignMigratedBridgeWidget(next, changedRef, values, "module_upscale_steps", fields.steps);
+    assignMigratedBridgeWidget(next, changedRef, values, "module_upscale_denoise", fields.denoise);
+    assignMigratedBridgeWidget(next, changedRef, values, "module_upscale_tile_width", fields.tileWidth);
+    assignMigratedBridgeWidget(next, changedRef, values, "module_upscale_tile_height", fields.tileHeight);
+    assignMigratedBridgeWidget(next, changedRef, values, "module_upscale_overlap", fields.overlap);
+    assignMigratedBridgeWidget(next, changedRef, values, "module_regional_lora_enabled", fields.regionalLora);
+    return changedRef.changed;
+}
+
+function migrateBridgeFrontendWidgetValues(values) {
+    if (!Array.isArray(values)) return { values, changed: false };
+    if (values.length !== PROMPT_WIDGET_NAMES.length + 1) return { values, changed: false };
+    const first = values[0];
+    const firstIsFrontendPlaceholder = first === null || first === undefined || first === "";
+    const shiftedPositive = typeof values[1] === "string" && values[1].trim() !== "";
+    const shiftedNegative = typeof values[2] === "string";
+    if (!firstIsFrontendPlaceholder || !shiftedPositive || !shiftedNegative) return { values, changed: false };
+    return { values: values.slice(1), changed: true };
+}
+
+function migrateLegacyBridgeWidgetsValues(values) {
+    if (!Array.isArray(values)) return { values, changed: false };
+    const i = BRIDGE_UPSCALE_WIDGET_INDEXES;
+    if (!bridgeLooksLikeUpscaleMode(values[i.mode])) return { values, changed: false };
+
+    const by = values[i.by];
+    const upscaler = values[i.upscaler];
+    const steps = values[i.steps];
+    const denoise = values[i.denoise];
+    const tileWidth = values[i.tileWidth];
+    const tileHeight = values[i.tileHeight];
+    const overlap = values[i.overlap];
+    const next = [...values];
+
+    const byLooksLikeSteps = bridgeLooksLikeSteps(by) && !bridgeLooksLikeScale(by);
+    const upscalerLooksLikeScale = bridgeLooksLikeScale(upscaler);
+    const upscalerLooksLikeSteps = bridgeLooksLikeSteps(upscaler);
+
+    if (
+        byLooksLikeSteps &&
+        upscalerLooksLikeScale &&
+        bridgeLooksLikeTile(steps) &&
+        bridgeLooksLikeTile(denoise) &&
+        bridgeLooksLikeOverlap(tileWidth) &&
+        bridgeLooksLikeBoolean(tileHeight)
+    ) {
+        const changed = applyLegacyUpscaleMigration(values, next, {
+            by: upscaler,
+            upscaler: BRIDGE_WIDGET_DEFAULTS.module_upscale_upscaler,
+            steps: by,
+            denoise: BRIDGE_WIDGET_DEFAULTS.module_upscale_denoise,
+            tileWidth: steps,
+            tileHeight: denoise,
+            overlap: tileWidth,
+            regionalLora: tileHeight,
+        });
+        return { values: next, changed };
+    }
+
+    if (
+        byLooksLikeSteps &&
+        upscalerLooksLikeScale &&
+        bridgeLooksLikeDenoise(steps) &&
+        bridgeLooksLikeTile(denoise) &&
+        bridgeLooksLikeTile(tileWidth) &&
+        bridgeLooksLikeOverlap(tileHeight)
+    ) {
+        const changed = applyLegacyUpscaleMigration(values, next, {
+            by: upscaler,
+            upscaler: BRIDGE_WIDGET_DEFAULTS.module_upscale_upscaler,
+            steps: by,
+            denoise: steps,
+            tileWidth: denoise,
+            tileHeight: tileWidth,
+            overlap: tileHeight,
+            regionalLora: overlap,
+        });
+        return { values: next, changed };
+    }
+
+    if (
+        bridgeLooksLikeScale(by) &&
+        upscalerLooksLikeSteps &&
+        bridgeLooksLikeDenoise(steps) &&
+        bridgeLooksLikeTile(denoise) &&
+        bridgeLooksLikeTile(tileWidth) &&
+        bridgeLooksLikeOverlap(tileHeight)
+    ) {
+        const changed = applyLegacyUpscaleMigration(values, next, {
+            by,
+            upscaler: BRIDGE_WIDGET_DEFAULTS.module_upscale_upscaler,
+            steps: upscaler,
+            denoise: steps,
+            tileWidth: denoise,
+            tileHeight: tileWidth,
+            overlap: tileHeight,
+            regionalLora: overlap,
+        });
+        return { values: next, changed };
+    }
+
+    if (
+        bridgeLooksLikeScale(by) &&
+        upscalerLooksLikeSteps &&
+        bridgeLooksLikeTile(steps) &&
+        bridgeLooksLikeTile(denoise) &&
+        bridgeLooksLikeOverlap(tileWidth) &&
+        bridgeLooksLikeBoolean(tileHeight)
+    ) {
+        const changed = applyLegacyUpscaleMigration(values, next, {
+            by,
+            upscaler: BRIDGE_WIDGET_DEFAULTS.module_upscale_upscaler,
+            steps: upscaler,
+            denoise: BRIDGE_WIDGET_DEFAULTS.module_upscale_denoise,
+            tileWidth: steps,
+            tileHeight: denoise,
+            overlap: tileWidth,
+            regionalLora: tileHeight,
+        });
+        return { values: next, changed };
+    }
+
+    return { values, changed: false };
+}
+
+function repairLegacyBridgeWidgetOrder(node) {
+    if (!node || !Array.isArray(node.widgets)) return 0;
+    const values = PROMPT_WIDGET_NAMES.map((name) => getWidget(node, name)?.value);
+    const repaired = sanitizeBridgeWidgetsValues(values);
+    if (!repaired.changed) return 0;
+    for (let index = 0; index < PROMPT_WIDGET_NAMES.length; index += 1) {
+        const widget = getWidget(node, PROMPT_WIDGET_NAMES[index]);
+        if (widget && !sameBridgeWidgetValue(widget.value, repaired.values[index])) {
+            widget.value = repaired.values[index];
+        }
+    }
+    return repaired.changed;
+}
+
+function applyBridgeWidgetsValuesToNode(node, values) {
+    if (!node || !Array.isArray(node.widgets) || !Array.isArray(values)) return 0;
+    const repaired = sanitizeBridgeWidgetsValues(values);
+    const source = repaired.values;
+    let changed = repaired.changed || 0;
+    for (let index = 0; index < PROMPT_WIDGET_NAMES.length; index += 1) {
+        const name = PROMPT_WIDGET_NAMES[index];
+        const widget = getWidget(node, name);
+        if (!widget) continue;
+        const value = sanitizeBridgeWidgetValue(name, source[index]);
+        if (!sameBridgeWidgetValue(widget.value, value)) {
+            widget.value = value;
+            changed += 1;
+        }
+    }
+    return changed;
+}
+
 function repairBridgeNodeWidgetDefaults(node) {
     if (!node || !Array.isArray(node.widgets)) return 0;
     let changed = 0;
@@ -2077,6 +2374,7 @@ function repairBridgeNodeWidgetDefaults(node) {
 }
 
 function bridgePromptWidgetValuesFromNode(node) {
+    repairLegacyBridgeWidgetOrder(node);
     repairBridgeNodeWidgetDefaults(node);
     const knownValues = PROMPT_WIDGET_NAMES.map((name) => {
         const widget = getWidget(node, name);
@@ -2093,13 +2391,16 @@ function bridgePromptWidgetValuesFromNode(node) {
 
 function sanitizeBridgeWidgetsValues(values) {
     if (!Array.isArray(values)) return { values, changed: 0 };
-    const next = [...values];
-    let changed = values.length < PROMPT_WIDGET_NAMES.length;
+    const frontendMigrated = migrateBridgeFrontendWidgetValues(values);
+    const migrated = migrateLegacyBridgeWidgetsValues(frontendMigrated.values);
+    const source = migrated.values;
+    const next = [...source];
+    let changed = Boolean(frontendMigrated.changed || migrated.changed) || values.length < PROMPT_WIDGET_NAMES.length;
     for (let index = 0; index < PROMPT_WIDGET_NAMES.length; index += 1) {
         const name = PROMPT_WIDGET_NAMES[index];
-        const repaired = sanitizeBridgeWidgetValue(name, values[index]);
+        const repaired = sanitizeBridgeWidgetValue(name, source[index]);
         next[index] = repaired;
-        if (!sameBridgeWidgetValue(values[index], repaired)) changed = true;
+        if (!sameBridgeWidgetValue(source[index], repaired) || !sameBridgeWidgetValue(values[index], repaired)) changed = true;
     }
     return { values: next, changed: changed ? 1 : 0 };
 }
@@ -10584,6 +10885,25 @@ function buildPanel(node) {
             : "已移除加速 LoRA；没找到 KSampler，采样参数未改");
     };
 
+    const stabilizeDomWidgetLayout = () => {
+        const desired = resolveBridgePanelSizeForLiveState(node, { clearConfiguredLock: true });
+        node.__webuiBridgeApplyDomWidgetSize?.(desired[0], desired[1]);
+        panel?.__webuiBridgeScheduleAdaptiveLayout?.();
+    };
+    const scheduleDomWidgetLayoutStabilization = () => {
+        stabilizeDomWidgetLayout();
+        let frames = 0;
+        const frameSync = () => {
+            stabilizeDomWidgetLayout();
+            frames += 1;
+            if (frames < 4) window.requestAnimationFrame?.(frameSync);
+        };
+        window.requestAnimationFrame?.(frameSync);
+        for (const delay of [80, 220, 520, 1000]) {
+            window.setTimeout?.(stabilizeDomWidgetLayout, delay);
+        }
+    };
+
     const queuePrompt = async () => {
         sync();
         if (!validateNumericParameters()) return;
@@ -10619,24 +10939,30 @@ function buildPanel(node) {
         }
         try {
             setStatus("正在提交生成任务...");
+            scheduleDomWidgetLayoutStabilization();
             const preflightRepairs = repairStaleInputLinks();
             if (preflightRepairs) setStatus(`已修复 ${preflightRepairs} 个悬空参数连接，正在提交...`);
             setStatus(await submitComfyQueue(), { kind: "success" });
+            scheduleDomWidgetLayoutStabilization();
         } catch (error) {
             const repaired = repairQueueParentLinkError(error);
             if (repaired) {
                 try {
                     setStatus("已修复尺寸/参数的悬空连接，正在重试提交...");
+                    scheduleDomWidgetLayoutStabilization();
                     setStatus(await submitComfyQueue(), { kind: "success" });
+                    scheduleDomWidgetLayoutStabilization();
                     return;
                 } catch (retryError) {
                     console.error("[WebUIPromptBridge] Queue retry failed", retryError);
                     setStatus(`重试后仍提交失败: ${queueErrorMessage(retryError)}`, { kind: "error", sticky: true });
+                    scheduleDomWidgetLayoutStabilization();
                     return;
                 }
             }
             console.error("[WebUIPromptBridge] Queue failed", error);
             setStatus(`生成提交失败: ${queueErrorMessage(error)}`, { kind: "error", sticky: true });
+            scheduleDomWidgetLayoutStabilization();
         }
     };
 
@@ -12081,6 +12407,8 @@ function installWebUIPanel(node) {
             repairBridgePanelLayoutAfterWorkflow(node, "reuse-panel");
             return;
         }
+        node.__webuiBridgePanel.__webuiBridgeShellGuard?.resizeObserver?.disconnect?.();
+        node.__webuiBridgePanel.__webuiBridgeShellGuard?.mutationObserver?.disconnect?.();
         node.__webuiBridgePanel.__webuiBridgeSidebarResizeObserver?.disconnect?.();
         node.__webuiBridgePanel.remove?.();
         node.__webuiBridgePanel = null;
@@ -15977,6 +16305,7 @@ app.registerExtension({
                 const repaired = sanitizeBridgeWidgetsValues(data.widgets_values);
                 if (repaired.changed) data.widgets_values = repaired.values;
                 this.__webuiBridgeUnknownWidgetValues = data.widgets_values.slice(PROMPT_WIDGET_NAMES.length);
+                applyBridgeWidgetsValuesToNode(this, data.widgets_values);
             } else {
                 this.__webuiBridgeUnknownWidgetValues = [];
             }
@@ -16002,6 +16331,7 @@ app.registerExtension({
                 this.__webuiBridgePreferConfiguredPanelSizeUntil = 0;
                 this.__webuiBridgeDesiredSize = clampPanelSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT);
             }
+            repairLegacyBridgeWidgetOrder(this);
             repairBridgeNodeWidgetDefaults(this);
             repairShiftedBridgeWidgets(this);
             scheduleBridgePanelInstall(this);
