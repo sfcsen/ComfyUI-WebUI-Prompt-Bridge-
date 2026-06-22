@@ -99,9 +99,6 @@ const PANEL_MIN_HEIGHT = 220;
 const PANEL_MAX_HEIGHT = 3200;
 const PANEL_BROKEN_MIN_WIDTH = 240;
 const PANEL_BROKEN_MIN_HEIGHT = 160;
-const PANEL_ANOMALOUS_NARROW_WIDTH = 760;
-const PANEL_ANOMALOUS_TALL_HEIGHT = 900;
-const PANEL_ANOMALOUS_TALL_RATIO = 1.75;
 const DOM_WIDGET_LAYOUT_PAD = 128;
 const DOM_WIDGET_PANEL_PAD = 14;
 const WORKFLOW_LAYOUT_REPAIR_DELAYS = [0, 32, 120, 360, 900, 1600, 3200, 6500];
@@ -115,7 +112,6 @@ const EXTRA_NETWORKS_CARD_ROW_MIN_HEIGHT = 72;
 const PANEL_SPLIT_GRIP_HEIGHT = 22;
 const COLLAPSED_NEGATIVE_SPLIT_GRIP_HEIGHT = 22;
 const EXTRA_NETWORKS_MAX_HEIGHT = PANEL_MAX_HEIGHT;
-const EXTRA_NETWORKS_DEFAULT_VISIBLE_HEIGHT = 420;
 const DEFAULT_REGIONAL_CANVAS_WIDTH = 1024;
 const DEFAULT_REGIONAL_CANVAS_HEIGHT = 1024;
 const REGIONAL_WIDTH_ALIASES = [
@@ -943,34 +939,25 @@ function looksLikeBrokenBridgePanelSize(size) {
     return width < PANEL_BROKEN_MIN_WIDTH || height < PANEL_BROKEN_MIN_HEIGHT || width > PANEL_MAX_WIDTH || height > PANEL_MAX_HEIGHT;
 }
 
-function looksLikeAnomalousNarrowBridgePanelSize(size) {
-    const values = bridgePanelSizeValues(size);
-    if (!values) return false;
-    const [width, height] = values;
-    if (looksLikeBrokenBridgePanelSize(size)) return true;
-    return width < PANEL_ANOMALOUS_NARROW_WIDTH &&
-        height > PANEL_ANOMALOUS_TALL_HEIGHT &&
-        height / Math.max(width, 1) > PANEL_ANOMALOUS_TALL_RATIO;
-}
-
 function shouldRepairBridgePanelSize(size) {
-    return looksLikeBrokenBridgePanelSize(size) ||
-        looksLikeAnomalousNarrowBridgePanelSize(size);
+    return looksLikeBrokenBridgePanelSize(size);
 }
 
 function looksLikeSavedUserBridgePanelSize(size) {
     return Boolean(bridgePanelSizeValues(size)) &&
         !looksLikeLegacyDefaultSize(size) &&
-        !looksLikeBrokenBridgePanelSize(size) &&
-        !looksLikeAnomalousNarrowBridgePanelSize(size);
+        !looksLikeBrokenBridgePanelSize(size);
 }
 
 function nodeHasSavedUserBridgePanelSize(node) {
-    if (node?.__webuiBridgeFreshNode && !node.__webuiBridgeWasConfigured && !node.__webuiBridgeFreshLayoutApplied) {
+    if (node?.__webuiBridgeFreshNode &&
+        !node.__webuiBridgeWasConfigured &&
+        !node.__webuiBridgeUserSized &&
+        !looksLikeSavedUserBridgePanelSize(node.__webuiBridgeSavedPanelSize)) {
         return false;
     }
     return looksLikeSavedUserBridgePanelSize(node?.__webuiBridgeSavedPanelSize) ||
-        looksLikeSavedUserBridgePanelSize(node?.size);
+        (Boolean(node?.__webuiBridgeUserSized || node?.__webuiBridgeWasConfigured) && looksLikeSavedUserBridgePanelSize(node?.size));
 }
 
 function bridgeConfiguredSizeLockActive(node) {
@@ -1038,6 +1025,14 @@ function resolveBridgePanelSize(node) {
 }
 
 function resolveBridgePanelSizeForLiveState(node, options = {}) {
+    if (node?.__webuiBridgeFreshNode &&
+        !node.__webuiBridgeWasConfigured &&
+        !node.__webuiBridgeUserSized &&
+        !looksLikeSavedUserBridgePanelSize(node.__webuiBridgeSavedPanelSize)) {
+        const desired = normalizeBridgePanelSize(node.__webuiBridgeDesiredSize || node.size);
+        node.__webuiBridgeDesiredSize = [...desired];
+        return desired;
+    }
     const liveSize = looksLikeSavedUserBridgePanelSize(node?.size)
         ? normalizeBridgePanelSize(node.size)
         : null;
@@ -1115,6 +1110,7 @@ function moveWidgetToFront(node, widget) {
 
 function pinBridgeDomWidgetToTop(node, widget) {
     if (!widget) return;
+    if (node) node.widgets_start_y = 0;
     moveWidgetToFront(node, widget);
     widget.y = 0;
     widget.last_y = 0;
@@ -1123,12 +1119,31 @@ function pinBridgeDomWidgetToTop(node, widget) {
 function syncBridgeDomWidgetWrapper(panel, width, height) {
     if (!panel?.parentElement) return;
     const setImportant = (target, property, value) => target?.style?.setProperty?.(property, value, "important");
+    const clearImportant = (target, property) => target?.style?.removeProperty?.(property);
+    const clearGlobalShell = (root) => {
+        if (!root ||
+            root.classList?.contains("dom-widget") ||
+            root.classList?.contains("lg-node-widget") ||
+            root.classList?.contains("lg-node-widgets")) return;
+        root.classList?.remove?.("webui-bridge-dom-widget-shell");
+        for (const property of ["width", "max-width", "min-width", "height", "min-height", "box-sizing", "overflow"]) {
+            clearImportant(root, property);
+        }
+    };
+    document.querySelectorAll?.([
+        "main.webui-bridge-dom-widget-shell",
+        ".comfyui-body.webui-bridge-dom-widget-shell",
+        ".graph-canvas-container.webui-bridge-dom-widget-shell",
+        ".isolate.webui-bridge-dom-widget-shell",
+    ].join(","))?.forEach(clearGlobalShell);
     const roots = [];
     let current = panel.parentElement;
     for (let depth = 0; current && depth < 5; depth += 1) {
         if (current === document.body || current.classList?.contains("lg-node")) break;
         roots.push(current);
-        if (current.classList?.contains("lg-node-widgets")) break;
+        if (current.classList?.contains("dom-widget") ||
+            current.classList?.contains("lg-node-widget") ||
+            current.classList?.contains("lg-node-widgets")) break;
         current = current.parentElement;
     }
     for (const root of roots) {
@@ -1296,6 +1311,41 @@ function forwardBridgeCanvasPointer(event, methodName) {
     }
 }
 
+function cloneBridgeCanvasPointerEvent(event, type = event?.type) {
+    const Ctor = type?.startsWith?.("pointer") && typeof PointerEvent !== "undefined" ? PointerEvent : MouseEvent;
+    return new Ctor(type, {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        clientX: event.clientX,
+        clientY: event.clientY,
+        screenX: event.screenX,
+        screenY: event.screenY,
+        button: event.button,
+        buttons: event.buttons,
+        ctrlKey: event.ctrlKey,
+        shiftKey: event.shiftKey,
+        altKey: event.altKey,
+        metaKey: event.metaKey,
+        pointerId: event.pointerId,
+        pointerType: event.pointerType,
+        isPrimary: event.isPrimary,
+    });
+}
+
+function dispatchBridgeCanvasPointerFallback(event) {
+    const canvasElement = app?.canvas?.canvas;
+    if (!canvasElement) return false;
+    try {
+        const forwarded = cloneBridgeCanvasPointerEvent(event);
+        Object.defineProperty(forwarded, "__webuiBridgeCanvasPointerForwarded", { value: true, configurable: true });
+        return canvasElement.dispatchEvent(forwarded);
+    } catch (error) {
+        console.warn(`[WebUI Prompt Bridge] Failed to dispatch ${event.type} to ComfyUI canvas`, error);
+        return false;
+    }
+}
+
 function forwardBridgePendingNodePlacementPointer(event) {
     if (event.__webuiBridgeCanvasPointerForwarded) return false;
     if (!bridgeCanvasHasPendingNodePlacement()) return false;
@@ -1360,15 +1410,23 @@ function installBridgeCanvasPointerRelay(startEvent) {
     window.addEventListener("blur", relayCancel, true);
 }
 
+function bridgePanelPointerRequestsCanvasPan(event) {
+    return event.button === 1 ||
+        event.buttons === 4;
+}
+
 function forwardBridgePanelPointerDown(event, handleSelector) {
     const canvas = app?.canvas;
-    const isMiddlePan = event.button === 1 || event.buttons === 4;
+    const wantsCanvasPan = bridgePanelPointerRequestsCanvasPan(event);
     if (event.__webuiBridgeCanvasPointerForwarded) return false;
     if (!canvas || typeof canvas.processMouseDown !== "function") return false;
-    if (event.defaultPrevented && !isMiddlePan) return false;
-    if (!isMiddlePan && bridgePanelTargetOwnsPointer(event.target, handleSelector)) return false;
+    if (event.defaultPrevented && !wantsCanvasPan) return false;
+    if (!wantsCanvasPan && bridgePanelTargetOwnsPointer(event.target, handleSelector)) return false;
     if (bridgeCanvasPointerIsActive(canvas)) return false;
     const forwarded = forwardBridgeCanvasPointer(event, "processMouseDown");
+    if (forwarded && wantsCanvasPan && !bridgeCanvasPointerIsActive(canvas)) {
+        dispatchBridgeCanvasPointerFallback(event);
+    }
     if (forwarded) event.preventDefault?.();
     return forwarded;
 }
@@ -1376,6 +1434,45 @@ function forwardBridgePanelPointerDown(event, handleSelector) {
 function stopBridgeCanvasOwnedPointer(event) {
     event.stopPropagation();
     event.stopImmediatePropagation?.();
+}
+
+function cloneBridgeCanvasWheelEvent(event) {
+    return new WheelEvent(event.type, {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        deltaX: event.deltaX,
+        deltaY: event.deltaY,
+        deltaZ: event.deltaZ,
+        deltaMode: event.deltaMode,
+        clientX: event.clientX,
+        clientY: event.clientY,
+        screenX: event.screenX,
+        screenY: event.screenY,
+        ctrlKey: event.ctrlKey,
+        shiftKey: event.shiftKey,
+        altKey: event.altKey,
+        metaKey: event.metaKey,
+        button: event.button,
+        buttons: event.buttons,
+    });
+}
+
+function forwardBridgeCanvasWheel(event) {
+    const canvas = app?.canvas;
+    const canvasElement = canvas?.canvas || document.querySelector("canvas");
+    if (!canvasElement || event.__webuiBridgeForwardedWheel) return false;
+    const forwarded = cloneBridgeCanvasWheelEvent(event);
+    Object.defineProperty(forwarded, "__webuiBridgeForwardedWheel", { value: true });
+    if (typeof canvas?.processMouseWheel === "function") {
+        try {
+            canvas.processMouseWheel(forwarded);
+            return true;
+        } catch (error) {
+            console.warn("[WebUI Prompt Bridge] Failed to forward wheel to ComfyUI canvas", error);
+        }
+    }
+    return canvasElement.dispatchEvent(forwarded);
 }
 
 function installBridgeDocumentCanvasPointerCapture(handleSelector) {
@@ -1453,31 +1550,9 @@ function installBridgePanelCanvasEventGuards(panel) {
             event.stopPropagation();
             return;
         }
-        const canvas = app?.canvas?.canvas || document.querySelector("canvas");
-        if (!canvas || event.__webuiBridgeForwardedWheel) return;
+        if (!forwardBridgeCanvasWheel(event)) return;
         event.preventDefault();
         event.stopPropagation();
-        const forwarded = new WheelEvent(event.type, {
-            bubbles: true,
-            cancelable: true,
-            composed: true,
-            deltaX: event.deltaX,
-            deltaY: event.deltaY,
-            deltaZ: event.deltaZ,
-            deltaMode: event.deltaMode,
-            clientX: event.clientX,
-            clientY: event.clientY,
-            screenX: event.screenX,
-            screenY: event.screenY,
-            ctrlKey: event.ctrlKey,
-            shiftKey: event.shiftKey,
-            altKey: event.altKey,
-            metaKey: event.metaKey,
-            button: event.button,
-            buttons: event.buttons,
-        });
-        Object.defineProperty(forwarded, "__webuiBridgeForwardedWheel", { value: true });
-        canvas.dispatchEvent(forwarded);
     }, { passive: false });
 }
 
@@ -1905,6 +1980,15 @@ function getAppGraphSafe() {
 
 function scheduleBridgePanelInstall(node) {
     if (node.__webuiBridgeInstallScheduled) return;
+    if (node.__webuiBridgeFreshNode && !node.__webuiBridgeWasConfigured) {
+        node.__webuiBridgeInstallScheduled = true;
+        try {
+            installWebUIPanel(node);
+        } finally {
+            node.__webuiBridgeInstallScheduled = false;
+        }
+        return;
+    }
     node.__webuiBridgeInstallScheduled = true;
     requestAnimationFrame(() => {
         node.__webuiBridgeInstallScheduled = false;
@@ -8727,8 +8811,16 @@ function buildPanel(node) {
         panel?.classList?.add(`layout-${normalizedPreset.replaceAll("_", "-")}`);
         return normalizedPreset;
     };
-    const applyLayoutPreset = (preset) => {
+    const applyLayoutPreset = (preset, options = {}) => {
         const normalizedPreset = setLayoutPresetClass(preset);
+        const preserveNodeSize = Boolean(options.preserveNodeSize);
+        if (!preserveNodeSize && node.__webuiBridgeFreshNode && !node.__webuiBridgeWasConfigured) {
+            node.__webuiBridgeFreshLayoutReleased = true;
+        }
+        const preserveFreshHeights = preserveNodeSize &&
+            node.__webuiBridgeFreshNode &&
+            !node.__webuiBridgeWasConfigured &&
+            node.__webuiBridgeFreshInitialLayoutSeeded;
         const clearLayoutPresetOverrides = () => {
             for (const key of [
                 topRowHeightKey,
@@ -8786,6 +8878,7 @@ function buildPanel(node) {
         };
         const fitNodeToVisibleContent = (width, minimumHeight) => {
             requestAnimationFrame(() => requestAnimationFrame(() => {
+                if (nodeHasSavedUserBridgePanelSize(node) || bridgeConfiguredSizeLockActive(node)) return;
                 const splitter = panel?.querySelector?.(".webui-bridge-panel-splitter");
                 const panelStyle = panel ? getComputedStyle(panel) : null;
                 const paddingY = panelStyle ? (Number.parseFloat(panelStyle.paddingTop) || 0) + (Number.parseFloat(panelStyle.paddingBottom) || 0) : 0;
@@ -8793,7 +8886,7 @@ function buildPanel(node) {
                 const visibleBlocks = [topControls, topRow, splitter, extraSection].filter((item) => item && !resizeTargetHidden(item));
                 const contentHeight = visibleBlocks.reduce((sum, item) => sum + resizeTargetLayoutHeight(item), paddingY + rowGap * Math.max(0, visibleBlocks.length - 1));
                 const nextHeight = Math.max(minimumHeight || PANEL_MIN_HEIGHT, Math.ceil(contentHeight + DOM_WIDGET_LAYOUT_PAD));
-                setNodeSize(width, nextHeight);
+                setNodeSize(width, nextHeight, { remember: false });
             }));
         };
         const fitLoraToCardRows = (rows = 1) => {
@@ -8836,49 +8929,49 @@ function buildPanel(node) {
             }));
         };
         if (normalizedPreset === "compact") {
-            setNodeSize(920, 680);
+            if (!preserveNodeSize) setNodeSize(920, 680, { user: true });
             collapseNegative(false);
             extraCollapsed = false;
             writeLocalBoolean(extraCollapsedKey, false);
-            applyExtraCollapsedState?.();
+            applyExtraCollapsedState?.({ preserveExpandedHeight: preserveFreshHeights });
             setPanelHeights({ top: 420, lora: EXTRA_NETWORKS_MIN_HEIGHT, positiveText: 88, positiveTags: 150 });
-            fitLoraToCardRows(1);
-            fitNodeToVisibleContent(920, 620);
+            if (!preserveNodeSize) fitLoraToCardRows(1);
+            if (!preserveNodeSize) fitNodeToVisibleContent(920, 620);
         } else if (normalizedPreset === "roomy") {
-            setNodeSize(1380, 1180);
+            if (!preserveNodeSize) setNodeSize(1380, 1180, { user: true });
             collapseNegative(false);
             extraCollapsed = false;
             writeLocalBoolean(extraCollapsedKey, false);
-            applyExtraCollapsedState?.();
+            applyExtraCollapsedState?.({ preserveExpandedHeight: preserveFreshHeights });
             setPanelHeights({ top: 840, lora: EXTRA_NETWORKS_MIN_HEIGHT, positiveText: 138, positiveTags: 360 });
-            fitLoraToCardRows(1);
-            fitNodeToVisibleContent(1380, 1080);
+            if (!preserveNodeSize) fitLoraToCardRows(1);
+            if (!preserveNodeSize) fitNodeToVisibleContent(1380, 1080);
         } else if (normalizedPreset === "positive_focus") {
-            setNodeSize(1180, 760);
+            if (!preserveNodeSize) setNodeSize(1180, 760, { user: true });
             collapseNegative(true);
             extraCollapsed = false;
             writeLocalBoolean(extraCollapsedKey, false);
-            applyExtraCollapsedState?.();
+            applyExtraCollapsedState?.({ preserveExpandedHeight: preserveFreshHeights });
             setPanelHeights({ top: 500, lora: EXTRA_NETWORKS_MIN_HEIGHT, positiveText: 150, positiveTags: 240 });
-            fitLoraToCardRows(1);
-            fitNodeToVisibleContent(1180, 680);
+            if (!preserveNodeSize) fitLoraToCardRows(1);
+            if (!preserveNodeSize) fitNodeToVisibleContent(1180, 680);
         } else if (normalizedPreset === "minimal_lora") {
-            setNodeSize(940, 560);
+            if (!preserveNodeSize) setNodeSize(940, 560, { user: true });
             collapseNegative(true);
             extraCollapsed = true;
             writeLocalBoolean(extraCollapsedKey, true);
-            applyExtraCollapsedState?.();
+            applyExtraCollapsedState?.({ preserveExpandedHeight: preserveFreshHeights });
             setPanelHeights({ top: 460, positiveText: 130, positiveTags: 220 });
-            fitNodeToVisibleContent(940, 500);
+            if (!preserveNodeSize) fitNodeToVisibleContent(940, 500);
         } else {
-            setNodeSize(DEFAULT_PANEL_WIDTH, 1060);
+            if (!preserveNodeSize) setNodeSize(DEFAULT_PANEL_WIDTH, 1060, { user: true });
             collapseNegative(false);
             extraCollapsed = false;
             writeLocalBoolean(extraCollapsedKey, false);
-            applyExtraCollapsedState?.();
-            setPanelHeights({ top: 620, lora: EXTRA_NETWORKS_MIN_HEIGHT, positiveText: 110, positiveTags: 190 });
-            fitLoraToCardRows(2);
-            fitNodeToVisibleContent(DEFAULT_PANEL_WIDTH, 980);
+            applyExtraCollapsedState?.({ preserveExpandedHeight: preserveFreshHeights });
+            setPanelHeights({ top: 620, lora: preserveNodeSize ? undefined : EXTRA_NETWORKS_MIN_HEIGHT, positiveText: 110, positiveTags: 190 });
+            if (!preserveNodeSize) fitLoraToCardRows(2);
+            if (!preserveNodeSize) fitNodeToVisibleContent(DEFAULT_PANEL_WIDTH, 980);
         }
         scheduleAdaptiveLayout();
         requestAnimationFrame(() => applyUiVisibility?.());
@@ -10547,8 +10640,19 @@ function buildPanel(node) {
         }
     };
 
-    const setNodeSize = (width, height) => {
+    let syncNodeSizeInputs = () => {};
+    const setNodeSize = (width, height, options = {}) => {
         const [nextWidth, nextHeight] = clampPanelSize(width, height);
+        const rememberSize = options.remember !== false;
+        const userSize = Boolean(options.user);
+        if (userSize) {
+            node.__webuiBridgeUserSized = true;
+            node.__webuiBridgeFreshLayoutReleased = true;
+            node.__webuiBridgeFreshLayoutStabilizeUntil = 0;
+        }
+        if (rememberSize) {
+            node.__webuiBridgeSavedPanelSize = [nextWidth, nextHeight];
+        }
         const currentWidth = Math.round(Number(node.size?.[0] || 0));
         const currentHeight = Math.round(Number(node.size?.[1] || 0));
         const desiredWidth = Math.round(Number(node.__webuiBridgeDesiredSize?.[0] || 0));
@@ -10556,28 +10660,66 @@ function buildPanel(node) {
         if (currentWidth === nextWidth && currentHeight === nextHeight &&
             desiredWidth === nextWidth && desiredHeight === nextHeight) {
             node.__webuiBridgeApplyDomWidgetSize?.(nextWidth, nextHeight);
+            syncNodeSizeInputs();
             window.requestAnimationFrame?.(() => panel?.__webuiBridgeScheduleAdaptiveLayout?.());
             return;
         }
         node.__webuiBridgeDesiredSize = [nextWidth, nextHeight];
-        node.__webuiBridgeSavedPanelSize = [nextWidth, nextHeight];
-        node.setSize([nextWidth, nextHeight]);
+        node.__webuiBridgeManagedSetSize = true;
+        node.__webuiBridgeRememberNextSetSize = rememberSize;
+        node.__webuiBridgeSetSizeIsUser = userSize;
+        try {
+            node.size = [nextWidth, nextHeight];
+            node.setSize([nextWidth, nextHeight]);
+            if (Math.round(Number(node.size?.[0] || 0)) !== nextWidth ||
+                Math.round(Number(node.size?.[1] || 0)) !== nextHeight) {
+                node.size = [nextWidth, nextHeight];
+            }
+        } finally {
+            node.__webuiBridgeManagedSetSize = false;
+            node.__webuiBridgeRememberNextSetSize = false;
+            node.__webuiBridgeSetSizeIsUser = false;
+        }
+        syncNodeSizeInputs();
         app.graph?.setDirtyCanvas(true, true);
     };
 
     let resizeExtraWithNode = () => {};
+    let resizePanelSectionsWithNode = () => {};
     let settleManualResizeLayout = () => {};
     let suppressNodeBottomFitUntil = 0;
+    let suppressPanelAutoFitUntil = 0;
     let suppressPromptSplitFitUntil = 0;
     let suppressPromptInnerFitUntil = 0;
+    let manualNodeResizeActive = false;
     let promptLoraSplitManual = false;
     let promptInnerSplitManual = false;
     let manualResizeSettleTimer = 0;
     let bottomFitReleaseTimer = 0;
+    const freshInitialLayoutStabilizing = () => node.__webuiBridgeFreshNode &&
+        !node.__webuiBridgeWasConfigured &&
+        !node.__webuiBridgeUserSized &&
+        (performance?.now?.() || Date.now()) < (node.__webuiBridgeFreshLayoutStabilizeUntil || 0);
+    const freshInitialLayoutPending = () => node.__webuiBridgeFreshNode &&
+        !node.__webuiBridgeWasConfigured &&
+        !node.__webuiBridgeUserSized &&
+        !node.__webuiBridgeFreshLayoutApplied;
+    const releaseFreshInitialLayout = () => {
+        if (node.__webuiBridgeFreshNode && !node.__webuiBridgeWasConfigured) {
+            node.__webuiBridgeFreshLayoutReleased = true;
+            node.__webuiBridgeFreshLayoutStabilizeUntil = 0;
+        }
+    };
+    const panelAutoFitLocked = () => manualNodeResizeActive ||
+        freshInitialLayoutStabilizing() ||
+        (performance?.now?.() || Date.now()) < suppressPanelAutoFitUntil ||
+        nodeHasSavedUserBridgePanelSize(node) ||
+        bridgeConfiguredSizeLockActive(node);
+    const layoutSuppressionUntil = () => Math.max(suppressNodeBottomFitUntil, suppressPanelAutoFitUntil);
     const schedulePostSuppressionAdaptiveLayout = () => {
         window.clearTimeout?.(bottomFitReleaseTimer);
         const now = performance?.now?.() || Date.now();
-        const delay = Math.max(80, suppressNodeBottomFitUntil - now + 80);
+        const delay = Math.max(80, layoutSuppressionUntil() - now + 80);
         bottomFitReleaseTimer = window.setTimeout?.(() => {
             bottomFitReleaseTimer = 0;
             scheduleAdaptiveLayout?.();
@@ -10594,6 +10736,27 @@ function buildPanel(node) {
     const holdPromptInnerFit = () => {
         suppressPromptInnerFitUntil = (performance?.now?.() || Date.now()) + 1400;
     };
+    const holdPanelAutoFit = (duration = 2600) => {
+        const now = performance?.now?.() || Date.now();
+        suppressPanelAutoFitUntil = Math.max(suppressPanelAutoFitUntil, now + duration);
+        promptLoraSplitManual = true;
+        holdNodeBottomFit();
+        holdPromptSplitFit();
+    };
+    const beginManualNodeResize = () => {
+        releaseFreshInitialLayout();
+        manualNodeResizeActive = true;
+        holdPanelAutoFit();
+    };
+    const endManualNodeResize = () => {
+        manualNodeResizeActive = false;
+        holdPanelAutoFit();
+        scheduleManualResizeSettle();
+    };
+    const capturePanelSectionHeights = () => ({
+        top: resizeTargetLayoutHeight(topRow) || 0,
+        extra: resizeTargetLayoutHeight(extraSection) || 0,
+    });
     const hasSavedUserPanelSize = () => nodeHasSavedUserBridgePanelSize(node);
     if (hasSavedUserPanelSize()) holdNodeBottomFit();
     const scheduleManualResizeSettle = () => {
@@ -10604,9 +10767,15 @@ function buildPanel(node) {
         }, 120) || 0;
     };
     const resizeNode = (deltaWidth, deltaHeight) => {
-        holdNodeBottomFit();
-        setNodeSize((node.size?.[0] || DEFAULT_PANEL_WIDTH) + deltaWidth, (node.size?.[1] || DEFAULT_PANEL_HEIGHT) + deltaHeight);
-        resizeExtraWithNode(deltaHeight);
+        const startSections = capturePanelSectionHeights();
+        holdPanelAutoFit();
+        setNodeSize(
+            (node.size?.[0] || DEFAULT_PANEL_WIDTH) + deltaWidth,
+            (node.size?.[1] || DEFAULT_PANEL_HEIGHT) + deltaHeight,
+            { user: true },
+        );
+        resizePanelSectionsWithNode(deltaHeight, startSections);
+        scheduleManualResizeSettle();
     };
 
     const installResizeDrag = (handle) => {
@@ -10615,26 +10784,24 @@ function buildPanel(node) {
             event.stopPropagation();
             handle.setPointerCapture?.(event.pointerId);
             handle.classList.add("dragging");
-            holdNodeBottomFit();
+            beginManualNodeResize();
             const startX = event.clientX;
             const startY = event.clientY;
             const startWidth = node.size?.[0] || DEFAULT_PANEL_WIDTH;
             const startHeight = node.size?.[1] || DEFAULT_PANEL_HEIGHT;
+            const startSections = capturePanelSectionHeights();
             const viewportScale = resizeTargetViewportScale(node.__webuiBridgePanel || handle);
             const viewportXScale = resizeTargetViewportXScale(node.__webuiBridgePanel || handle);
-            let lastDeltaHeight = 0;
             const onMove = (moveEvent) => {
-                holdNodeBottomFit();
+                holdPanelAutoFit();
                 const deltaWidth = (moveEvent.clientX - startX) / viewportXScale;
                 const deltaHeight = (moveEvent.clientY - startY) / viewportScale;
-                setNodeSize(startWidth + deltaWidth, startHeight + deltaHeight);
-                resizeExtraWithNode(deltaHeight - lastDeltaHeight);
-                lastDeltaHeight = deltaHeight;
+                setNodeSize(startWidth + deltaWidth, startHeight + deltaHeight, { user: true });
+                resizePanelSectionsWithNode(deltaHeight, startSections);
             };
             const onUp = () => {
                 handle.classList.remove("dragging");
-                holdNodeBottomFit();
-                scheduleManualResizeSettle();
+                endManualNodeResize();
                 document.removeEventListener("pointermove", onMove, true);
                 document.removeEventListener("pointerup", onUp, true);
                 document.removeEventListener("pointercancel", onUp, true);
@@ -10650,7 +10817,7 @@ function buildPanel(node) {
             event.preventDefault();
             event.stopPropagation();
             handle.setPointerCapture?.(event.pointerId);
-            holdNodeBottomFit();
+            beginManualNodeResize();
             const startX = event.clientX;
             const startWidth = node.size?.[0] || DEFAULT_PANEL_WIDTH;
             const startHeight = node.size?.[1] || DEFAULT_PANEL_HEIGHT;
@@ -10661,13 +10828,12 @@ function buildPanel(node) {
                 const deltaWidth = (moveEvent.clientX - startX) / viewportXScale;
                 if (!moved && Math.abs(deltaWidth) < 3) return;
                 moved = true;
-                holdNodeBottomFit();
-                setNodeSize(startWidth + deltaWidth, startHeight);
+                holdPanelAutoFit();
+                setNodeSize(startWidth + deltaWidth, startHeight, { user: true });
             };
             const onUp = () => {
                 handle.classList.remove("dragging");
-                holdNodeBottomFit();
-                scheduleManualResizeSettle();
+                endManualNodeResize();
                 document.removeEventListener("pointermove", onMove, true);
                 document.removeEventListener("pointerup", onUp, true);
                 document.removeEventListener("pointercancel", onUp, true);
@@ -10751,15 +10917,63 @@ function buildPanel(node) {
         ]),
     ]);
 
+    const nodeWidthInput = el("input", {
+        type: "number",
+        min: PANEL_MIN_WIDTH,
+        max: PANEL_MAX_WIDTH,
+        step: 20,
+        inputmode: "numeric",
+        title: "输入节点宽度",
+    });
+    const nodeHeightInput = el("input", {
+        type: "number",
+        min: PANEL_MIN_HEIGHT,
+        max: PANEL_MAX_HEIGHT,
+        step: 20,
+        inputmode: "numeric",
+        title: "输入节点高度",
+    });
+    const nodeSizeField = (label, input) => el("label", { class: "webui-bridge-size-field" }, [
+        el("span", {}, label),
+        input,
+    ]);
+    syncNodeSizeInputs = () => {
+        const width = Math.round(Number(node.__webuiBridgeDesiredSize?.[0] || node.size?.[0] || DEFAULT_PANEL_WIDTH));
+        const height = Math.round(Number(node.__webuiBridgeDesiredSize?.[1] || node.size?.[1] || DEFAULT_PANEL_HEIGHT));
+        if (document.activeElement !== nodeWidthInput) nodeWidthInput.value = String(width);
+        if (document.activeElement !== nodeHeightInput) nodeHeightInput.value = String(height);
+    };
+    const applyNodeSizeInputs = () => {
+        const currentWidth = node.size?.[0] || DEFAULT_PANEL_WIDTH;
+        const currentHeight = node.size?.[1] || DEFAULT_PANEL_HEIGHT;
+        const nextWidth = Number(nodeWidthInput.value) || currentWidth;
+        const nextHeight = Number(nodeHeightInput.value) || currentHeight;
+        const startSections = capturePanelSectionHeights();
+        setNodeSize(nextWidth, nextHeight, { user: true });
+        resizePanelSectionsWithNode(nextHeight - currentHeight, startSections);
+        scheduleManualResizeSettle();
+    };
+    for (const input of [nodeWidthInput, nodeHeightInput]) {
+        input.addEventListener("change", applyNodeSizeInputs);
+        input.addEventListener("keydown", (event) => {
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            applyNodeSizeInputs();
+            input.blur();
+        });
+    }
+    syncNodeSizeInputs();
     const sizeControls = el("div", { class: "webui-bridge-size-controls" }, [
-        el("button", { title: "Compact size", onclick: () => setNodeSize(840, 620) }, "S"),
+        nodeSizeField("宽", nodeWidthInput),
+        nodeSizeField("高", nodeHeightInput),
+        el("button", { title: "Compact size", onclick: () => setNodeSize(840, 620, { user: true }) }, "S"),
         el("button", { title: "Smaller node", onclick: () => resizeNode(-120, -90) }, "-"),
         el("button", { title: "Larger node", onclick: () => resizeNode(120, 90) }, "+"),
         el("button", {
             title: "恢复节点默认尺寸并清理异常布局缓存",
             onclick: () => {
                 resetNodeLayoutCache();
-                setNodeSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT);
+                setNodeSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT, { user: true });
             },
         }, "默认尺寸"),
     ]);
@@ -11063,17 +11277,34 @@ function buildPanel(node) {
     };
     settleManualResizeLayout = () => {
         if (extraCollapsed || loraOverlayOpen || !panel?.isConnected || !extraSection?.isConnected) return;
+        if (freshInitialLayoutStabilizing()) return;
         window.requestAnimationFrame?.(() => {
             window.requestAnimationFrame?.(() => {
                 if (extraCollapsed || loraOverlayOpen || !panel?.isConnected || !extraSection?.isConnected) return;
+                if (freshInitialLayoutStabilizing()) return;
                 const panelRect = panel.getBoundingClientRect();
                 const extraRect = extraSection.getBoundingClientRect();
                 const scale = resizeTargetViewportScale(panel) || 1;
                 const targetGap = 12 * scale;
                 const blank = panelRect.bottom - extraRect.bottom - targetGap;
-                if (Math.abs(blank) <= Math.max(1, 2 * scale)) return;
+                const settleTolerance = Math.max(24 * scale, panelRect.height * 0.015);
+                if (Math.abs(blank) <= settleTolerance) return;
                 const currentHeight = resizeTargetLayoutHeight(extraSection) || EXTRA_NETWORKS_MIN_HEIGHT;
-                setResizeTargetHeight(extraSection, extraHeightKey, currentHeight + blank / scale, {
+                let nextExtraHeight = currentHeight + blank / scale;
+                if (blank < 0 && topRow?.isConnected) {
+                    const extraComfortHeight = getExtraResizeComfortHeight();
+                    const currentTopHeight = resizeTargetLayoutHeight(topRow) || 0;
+                    const topMin = getTopRowVisibleMinHeight();
+                    if (nextExtraHeight < extraComfortHeight && currentTopHeight > topMin + 1) {
+                        const topReduction = Math.min(currentTopHeight - topMin, extraComfortHeight - nextExtraHeight);
+                        setResizeTargetHeight(topRow, topRowHeightKey, currentTopHeight - topReduction, {
+                            min: topMin,
+                            max: topRow.__webuiBridgeMaxHeight,
+                        });
+                        nextExtraHeight += topReduction;
+                    }
+                }
+                setResizeTargetHeight(extraSection, extraHeightKey, nextExtraHeight, {
                     min: EXTRA_NETWORKS_MIN_HEIGHT,
                     max: extraSection.__webuiBridgeMaxHeight || EXTRA_NETWORKS_MAX_HEIGHT,
                 });
@@ -11081,7 +11312,11 @@ function buildPanel(node) {
             });
         });
     };
-    function applyExtraCollapsedState() {
+    function applyExtraCollapsedState(options = {}) {
+        const preserveExpandedHeight = Boolean(options.preserveExpandedHeight);
+        const preservedHeight = preserveExpandedHeight
+            ? (resizeTargetLayoutHeight(extraSection) || readLocalNumber(extraHeightKey, null) || 0)
+            : 0;
         extraSection.classList.toggle("collapsed", extraCollapsed);
         extraBody.style.display = extraCollapsed ? "none" : "";
         extraToggle.textContent = extraCollapsed ? "显示 LoRA" : "隐藏 LoRA";
@@ -11096,7 +11331,14 @@ function buildPanel(node) {
         extraSection.style.minHeight = "";
         extraSection.style.maxHeight = "";
         extraSection.style.flex = "0 0 auto";
-        applyStoredHeight(extraSection, extraHeightKey, { min: EXTRA_NETWORKS_MIN_HEIGHT, max: extraSection.__webuiBridgeMaxHeight });
+        if (preserveExpandedHeight && preservedHeight) {
+            setResizeTargetHeight(extraSection, extraHeightKey, preservedHeight, {
+                min: EXTRA_NETWORKS_MIN_HEIGHT,
+                max: extraSection.__webuiBridgeMaxHeight,
+            });
+        } else {
+            applyStoredHeight(extraSection, extraHeightKey, { min: EXTRA_NETWORKS_MIN_HEIGHT, max: extraSection.__webuiBridgeMaxHeight });
+        }
         extraSection.style.flex = "0 0 auto";
         requestAnimationFrame(ensureUsableExtraHeight);
         scheduleAdaptiveLayout();
@@ -11182,7 +11424,7 @@ function buildPanel(node) {
                 ? Math.max(DEFAULT_PANEL_WIDTH, currentWidth + delta)
                 : Math.max(DEFAULT_PANEL_WIDTH, currentWidth);
         }
-        setNodeSize(nextWidth, currentHeight);
+        setNodeSize(nextWidth, currentHeight, { user: true });
     };
     const actionToggle = el("button", {
         class: "webui-bridge-side-toggle",
@@ -11246,7 +11488,7 @@ function buildPanel(node) {
         tutorialButton,
         topControlButton("恢复尺寸", "恢复节点默认宽高并清理异常布局缓存，避免误点后缩成窄条", () => {
             resetNodeLayoutCache();
-            setNodeSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT);
+            setNodeSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT, { user: true });
         }),
         nodeWidthGrip,
         webuiButton,
@@ -11317,6 +11559,28 @@ function buildPanel(node) {
         return Math.ceil(positiveInputMin + positiveTagsMin + COLLAPSED_NEGATIVE_SPLIT_GRIP_HEIGHT + collapsedNegativeHeight + gap * 3);
     };
     const getExtraVisibleFloor = () => extraCollapsed ? 42 : EXTRA_NETWORKS_MIN_HEIGHT;
+    const getExtraResizeComfortHeight = () => extraCollapsed
+        ? 42
+        : Math.max(getExtraVisibleFloor(), EXTRA_NETWORKS_CARD_ROW_MIN_HEIGHT + 96);
+    const seedFreshInitialLayout = () => {
+        if (!freshInitialLayoutPending() || node.__webuiBridgeFreshInitialLayoutSeeded) return;
+        node.__webuiBridgeFreshInitialLayoutSeeded = true;
+        node.__webuiBridgeFreshLayoutStabilizeUntil = Math.max(
+            node.__webuiBridgeFreshLayoutStabilizeUntil || 0,
+            (performance?.now?.() || Date.now()) + 1800,
+        );
+        setLayoutPresetClass("default");
+        promptLoraSplitManual = true;
+        setResizeTargetHeight(topRow, topRowHeightKey, 620, {
+            min: getTopRowVisibleMinHeight(),
+            max: topRow.__webuiBridgeMaxHeight,
+        });
+        setResizeTargetHeight(extraSection, extraHeightKey, Math.max(452, getExtraResizeComfortHeight()), {
+            min: getExtraVisibleFloor(),
+            max: extraSection.__webuiBridgeMaxHeight || EXTRA_NETWORKS_MAX_HEIGHT,
+        });
+        extraSection.style.flex = "0 0 auto";
+    };
     const getPanelSplitterHeight = () => panel?.querySelector?.(".webui-bridge-panel-splitter")?.offsetHeight || PANEL_SPLIT_GRIP_HEIGHT;
     const getPanelTopControlsHeight = () => topControls && !resizeTargetHidden(topControls) ? resizeTargetLayoutHeight(topControls) : 0;
     const getTopRowVisibleMaxHeight = () => {
@@ -11328,6 +11592,46 @@ function buildPanel(node) {
         const rowGap = Number.parseFloat(panelStyle.rowGap || panelStyle.gap) || 0;
         const visibleMax = panelHeight - paddingY - getPanelTopControlsHeight() - rowGap * 3 - getPanelSplitterHeight() - getExtraVisibleFloor() - 4;
         return Math.max(topMin, Math.min(topRow.__webuiBridgeMaxHeight, Math.floor(visibleMax)));
+    };
+    resizePanelSectionsWithNode = (deltaHeight, startSections = capturePanelSectionHeights()) => {
+        if (!deltaHeight || extraCollapsed || loraOverlayOpen || !topRow?.isConnected || !extraSection?.isConnected) {
+            resizeExtraWithNode(deltaHeight);
+            return;
+        }
+        promptLoraSplitManual = true;
+        holdPanelAutoFit();
+        const topMin = getTopRowVisibleMinHeight();
+        const topMax = topRow.__webuiBridgeMaxHeight || PANEL_MAX_HEIGHT;
+        const extraMin = getExtraVisibleFloor();
+        const extraMax = extraSection.__webuiBridgeMaxHeight || EXTRA_NETWORKS_MAX_HEIGHT;
+        const startTop = clampNumber(startSections?.top || resizeTargetLayoutHeight(topRow) || topMin, topMin, topMax);
+        const startExtra = clampNumber(startSections?.extra || resizeTargetLayoutHeight(extraSection) || extraMin, extraMin, extraMax);
+        const startTotal = Math.max(topMin + extraMin, startTop + startExtra);
+        const targetTotal = clampNumber(startTotal + deltaHeight, topMin + extraMin, topMax + extraMax);
+        const extraShare = clampNumber(startExtra / Math.max(startTotal, 1), 0.12, 0.55);
+        const extraComfortHeight = getExtraResizeComfortHeight();
+        const comfortableExtraFloor = Math.min(
+            Math.max(extraMin, extraComfortHeight, startExtra > extraMin + 12 ? startExtra : extraMin),
+            Math.max(extraMin, targetTotal - topMin),
+        );
+        const maxExtraForTotal = Math.max(extraMin, Math.min(extraMax, targetTotal - topMin));
+        let nextExtra = clampNumber(
+            Math.max(targetTotal * extraShare, comfortableExtraFloor),
+            extraMin,
+            maxExtraForTotal,
+        );
+        const maxTopForTotal = Math.max(topMin, Math.min(topMax, targetTotal - extraMin));
+        let nextTop = clampNumber(targetTotal - nextExtra, topMin, maxTopForTotal);
+        nextExtra = clampNumber(targetTotal - nextTop, extraMin, extraMax);
+        setResizeTargetHeight(topRow, topRowHeightKey, nextTop, {
+            min: topMin,
+            max: topMax,
+        });
+        setResizeTargetHeight(extraSection, extraHeightKey, nextExtra, {
+            min: extraMin,
+            max: extraMax,
+        });
+        extraSection.style.flex = "0 0 auto";
     };
     applyStoredHeight(topRow, topRowHeightKey, { min: topRow.__webuiBridgeMinHeight, max: topRow.__webuiBridgeMaxHeight });
     applyTopRowCollapsedState(topRow, negative.row.classList.contains("collapsed"));
@@ -11344,16 +11648,39 @@ function buildPanel(node) {
             afterFlex: "0 0 auto",
             label: "提示词 / LoRA",
             title: "上下拖动分配提示词区域和 Extra Networks 高度，双击恢复",
-            onDragStart: holdPromptSplitFit,
+            onDragStart: () => {
+                releaseFreshInitialLayout();
+                promptLoraSplitManual = true;
+                holdPanelAutoFit();
+            },
             onDragMove: () => {
                 promptLoraSplitManual = true;
-                holdPromptSplitFit();
+                holdPanelAutoFit();
             },
-            onDragEnd: holdPromptSplitFit,
+            onDragEnd: holdPanelAutoFit,
         }),
         extraSection,
         resizeGrip,
     ]);
+    node.__webuiBridgeHandleExternalNodeResize = ({ previousHeight, height } = {}) => {
+        if (!panel?.isConnected) return;
+        releaseFreshInitialLayout();
+        const beforeHeight = Number(previousHeight || 0);
+        const afterHeight = Number(height || 0);
+        const deltaHeight = Number.isFinite(beforeHeight) && Number.isFinite(afterHeight)
+            ? afterHeight - beforeHeight
+            : 0;
+        if (Math.abs(deltaHeight) >= 1) {
+            const startSections = capturePanelSectionHeights();
+            promptLoraSplitManual = true;
+            resizePanelSectionsWithNode(deltaHeight, startSections);
+            scheduleManualResizeSettle();
+        } else {
+            holdPanelAutoFit();
+            scheduleAdaptiveLayout();
+        }
+        syncNodeSizeInputs();
+    };
     installBridgePanelCanvasEventGuards(panel);
     node.__webuiBridgeMinNodeHeight = () => {
         const splitter = panel.querySelector?.(".webui-bridge-panel-splitter");
@@ -11363,6 +11690,7 @@ function buildPanel(node) {
         return Math.max(PANEL_MIN_HEIGHT, DOM_WIDGET_LAYOUT_PAD + getPanelTopControlsHeight() + getTopRowVisibleMinHeight() + splitterHeight + extraFloor + 24);
     };
     applyPanelFontSize(panel);
+    seedFreshInitialLayout();
     const refreshSidebarWidth = () => setSidebarWidth(
         topRow,
         "",
@@ -11379,6 +11707,7 @@ function buildPanel(node) {
 
     const fitLoraSectionToVisibleRows = (rows = 1, { force = false, fillAvailable = false } = {}) => {
         if (extraCollapsed || loraOverlayOpen || !extraSection?.isConnected) return;
+        if (!force && panelAutoFitLocked()) return;
         if (!force && !fillAvailable && (performance?.now?.() || Date.now()) < suppressNodeBottomFitUntil) return;
         const extraRect = extraSection.getBoundingClientRect();
         const headHeight = extraSection.querySelector(".webui-bridge-extra-head")?.offsetHeight || 44;
@@ -11438,6 +11767,7 @@ function buildPanel(node) {
 
     const fitNodeBottomToVisibleContent = () => {
         if (loraOverlayOpen || !panel?.isConnected || !extraSection?.isConnected) return;
+        if (freshInitialLayoutStabilizing()) return;
         if (bridgeConfiguredSizeLockActive(node)) return;
         if (nodeHasSavedUserBridgePanelSize(node)) return;
         if ((performance?.now?.() || Date.now()) < suppressNodeBottomFitUntil) return;
@@ -11474,21 +11804,14 @@ function buildPanel(node) {
             shrinkFloor = Math.max(shrinkFloor, Math.ceil(requiredHeight));
         }
         if (currentHeight < shrinkFloor - 2) {
-            setNodeSize(currentWidth, shrinkFloor);
+            setNodeSize(currentWidth, shrinkFloor, { remember: false });
             return;
         }
-        const panelRect = panel.getBoundingClientRect();
-        const extraRect = extraSection.getBoundingClientRect();
-        const scale = resizeTargetViewportScale(panel) || 1;
-        const targetGap = 12 * scale;
-        const extraBottom = extraRect.bottom || panelRect.bottom;
-        const blank = panelRect.bottom - extraBottom - targetGap;
-        if (blank <= Math.max(1, 2 * scale)) return;
-        setNodeSize(currentWidth, Math.max(shrinkFloor, currentHeight - blank / scale));
     };
 
     const fillExtraSectionToPanelBottom = () => {
         if (extraCollapsed || loraOverlayOpen || !panel?.isConnected || !extraSection?.isConnected) return;
+        if (panelAutoFitLocked()) return;
         const activePreset = state.settings?.layout_preset || "default";
         const canGrow = !promptLoraSplitManual && (activePreset === "default" || activePreset === "roomy");
         const panelRect = panel.getBoundingClientRect();
@@ -11496,9 +11819,10 @@ function buildPanel(node) {
         const scale = resizeTargetViewportScale(panel) || 1;
         const targetGap = 6 * scale;
         const blank = panelRect.bottom - extraRect.bottom - targetGap;
+        const settleTolerance = Math.max(24 * scale, panelRect.height * 0.015);
         const largeBottomBlank = blank > Math.max(96 * scale, panelRect.height * 0.08);
-        if (blank > Math.max(1, 2 * scale) && !canGrow && !largeBottomBlank) return;
-        if (Math.abs(blank) <= Math.max(1, 2 * scale)) return;
+        if (blank > settleTolerance && !canGrow && !largeBottomBlank) return;
+        if (Math.abs(blank) <= settleTolerance && !largeBottomBlank) return;
         const currentHeight = resizeTargetLayoutHeight(extraSection) || EXTRA_NETWORKS_MIN_HEIGHT;
         const nextHeight = currentHeight + blank / scale;
         setResizeTargetHeight(extraSection, extraHeightKey, nextHeight, {
@@ -11566,6 +11890,8 @@ function buildPanel(node) {
         }
         window.requestAnimationFrame?.(() => {
             if (!topRow || resizeTargetHidden(topRow)) return;
+            if (freshInitialLayoutPending()) return;
+            if (nodeHasSavedUserBridgePanelSize(node) || bridgeConfiguredSizeLockActive(node)) return;
             if (promptLoraSplitManual || (performance?.now?.() || Date.now()) < suppressPromptSplitFitUntil) return;
             const presetTopTargets = {
                 compact: 420,
@@ -11617,6 +11943,7 @@ function buildPanel(node) {
         });
     };
     panel.__webuiBridgeScheduleAdaptiveLayout = scheduleAdaptiveLayout;
+    panel.__webuiBridgeSettleManualResizeLayout = settleManualResizeLayout;
 
     function installPromptKeys(textarea, after) {
         textarea.addEventListener("keydown", (event) => {
@@ -11681,7 +12008,7 @@ function buildPanel(node) {
         if (!node.__webuiBridgeInitialLayoutApplied) {
             node.__webuiBridgeInitialLayoutApplied = true;
             if (shouldApplyFreshDefaults) {
-                applyLayoutPreset(state.settings?.layout_preset || "default");
+                applyLayoutPreset(state.settings?.layout_preset || "default", { preserveNodeSize: true });
             } else {
                 setLayoutPresetClass(state.settings?.layout_preset || "default");
                 scheduleAdaptiveLayout();
@@ -11746,11 +12073,29 @@ function installWebUIPanel(node) {
         const originalSetSize = node.setSize.bind(node);
         node.setSize = function (size) {
             if (Array.isArray(size) && Number.isFinite(size[0]) && Number.isFinite(size[1])) {
-                const clamped = clampPanelSize(size[0], size[1]);
+                const requestedNeedsRepair = shouldRepairBridgePanelSize(size);
                 const currentWidth = Math.round(Number(node.size?.[0] || 0));
                 const currentHeight = Math.round(Number(node.size?.[1] || 0));
                 const desiredWidth = Math.round(Number(node.__webuiBridgeDesiredSize?.[0] || 0));
                 const desiredHeight = Math.round(Number(node.__webuiBridgeDesiredSize?.[1] || 0));
+                const desiredSize = node.__webuiBridgeDesiredSize
+                    ? clampPanelSize(node.__webuiBridgeDesiredSize[0], node.__webuiBridgeDesiredSize[1])
+                    : null;
+                const repairFallback = desiredSize || clampPanelSize(
+                    currentWidth || DEFAULT_PANEL_WIDTH,
+                    currentHeight || DEFAULT_PANEL_HEIGHT,
+                );
+                const clamped = requestedNeedsRepair
+                    ? [...repairFallback]
+                    : clampPanelSize(size[0], size[1]);
+                const rememberSize = Boolean(node.__webuiBridgeRememberNextSetSize);
+                const managedSetSize = Boolean(node.__webuiBridgeManagedSetSize);
+                const applyingConfiguredSize = Boolean(node.__webuiBridgeApplyingConfiguredSize);
+                const managedSizeWrite = rememberSize ||
+                    managedSetSize ||
+                    applyingConfiguredSize ||
+                    (desiredSize && bridgePanelSizesMatch(clamped, desiredSize, 1));
+                const externalUserSize = !managedSizeWrite && !requestedNeedsRepair;
                 if (currentWidth === clamped[0] && currentHeight === clamped[1] &&
                     desiredWidth === clamped[0] && desiredHeight === clamped[1]) {
                     node.__webuiBridgeApplyDomWidgetSize?.(clamped[0], clamped[1]);
@@ -11758,14 +12103,33 @@ function installWebUIPanel(node) {
                     return node;
                 }
                 node.__webuiBridgeDesiredSize = clamped;
-                if (!node.__webuiBridgeApplyingConfiguredSize) {
+                if ((rememberSize || externalUserSize) && !applyingConfiguredSize) {
                     node.__webuiBridgeSavedPanelSize = [...clamped];
+                    if (node.__webuiBridgeSetSizeIsUser || externalUserSize) {
+                        node.__webuiBridgeUserSized = true;
+                        node.__webuiBridgeFreshLayoutReleased = true;
+                        node.__webuiBridgeFreshLayoutStabilizeUntil = 0;
+                    }
                     node.__webuiBridgePreferConfiguredPanelSizeUntil = 0;
                 }
                 node.__webuiBridgeHoldNodeBottomFit?.();
+                node.size = [...clamped];
                 const result = originalSetSize(clamped);
+                if (Math.round(Number(node.size?.[0] || 0)) !== clamped[0] ||
+                    Math.round(Number(node.size?.[1] || 0)) !== clamped[1]) {
+                    node.size = [...clamped];
+                }
                 node.__webuiBridgeApplyDomWidgetSize?.(clamped[0], clamped[1]);
-                window.requestAnimationFrame?.(() => node.__webuiBridgePanel?.__webuiBridgeScheduleAdaptiveLayout?.());
+                if (externalUserSize) {
+                    node.__webuiBridgeHandleExternalNodeResize?.({
+                        previousWidth: currentWidth,
+                        previousHeight: currentHeight,
+                        width: clamped[0],
+                        height: clamped[1],
+                    });
+                } else {
+                    window.requestAnimationFrame?.(() => node.__webuiBridgePanel?.__webuiBridgeScheduleAdaptiveLayout?.());
+                }
                 return result;
             }
             return originalSetSize(size);
@@ -11864,27 +12228,24 @@ function installWebUIPanel(node) {
             applyDomWidgetSize(savedSize[0], savedSize[1]);
         }
     }
-    if (hadRepairablePanelSize) {
-        window.requestAnimationFrame?.(() => panel.__webuiBridgeResetNodeLayoutCache?.());
+    if (hadRepairablePanelSize || node.__webuiBridgeRepairedPanelSize) {
+        window.requestAnimationFrame?.(() => {
+            panel.__webuiBridgeResetNodeLayoutCache?.();
+            node.__webuiBridgeRepairedPanelSize = false;
+        });
     }
     if (node.__webuiBridgeFreshNode && !node.__webuiBridgeWasConfigured && !nodeHasSavedUserBridgePanelSize(node) && !node.__webuiBridgeFreshSizeApplied) {
-        node.__webuiBridgeDesiredSize = clampPanelSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT);
+        const freshSize = shouldRepairBridgePanelSize(node.size)
+            ? clampPanelSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT)
+            : normalizeBridgePanelSize(node.size || node.__webuiBridgeDesiredSize);
+        node.__webuiBridgeDesiredSize = [...freshSize];
         node.__webuiBridgeFreshSizeApplied = true;
-        node.setSize(node.__webuiBridgeDesiredSize);
-        const enforceFreshSize = () => {
-            const desired = node.__webuiBridgeDesiredSize;
-            if (!node.__webuiBridgeFreshNode || node.__webuiBridgeWasConfigured || !Array.isArray(desired)) return;
-            if ((node.size?.[1] || 0) > desired[1] + 8 || (node.size?.[0] || 0) !== desired[0]) {
-                node.setSize(desired);
-                getAppGraphSafe()?.setDirtyCanvas?.(true, true);
-            }
-        };
-        window.setTimeout(enforceFreshSize, 0);
-        window.setTimeout(enforceFreshSize, 250);
+        if (shouldRepairBridgePanelSize(node.size)) {
+            node.setSize(freshSize);
+        } else {
+            applyDomWidgetSize(freshSize[0], freshSize[1]);
+        }
     } else if (looksLikeLegacyDefaultSize(node.size)) {
-        node.__webuiBridgeDesiredSize = clampPanelSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT);
-        node.setSize(node.__webuiBridgeDesiredSize);
-    } else if (looksLikeAnomalousNarrowBridgePanelSize(node.size)) {
         node.__webuiBridgeDesiredSize = clampPanelSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT);
         node.setSize(node.__webuiBridgeDesiredSize);
     } else if (!node.size || node.size[0] < PANEL_MIN_WIDTH || node.size[1] < PANEL_MIN_HEIGHT) {
@@ -12292,8 +12653,35 @@ function addStyles() {
         }
         .webui-bridge-size-controls {
             display: grid;
-            grid-template-columns: 32px 32px 32px minmax(42px, 1fr);
+            grid-template-columns: repeat(2, minmax(72px, 1fr)) 32px 32px 32px minmax(56px, 1fr);
             gap: 5px;
+        }
+        .webui-bridge-size-field {
+            min-width: 0;
+            height: 28px;
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr);
+            align-items: center;
+            gap: 4px;
+            padding: 0 5px;
+            box-sizing: border-box;
+            border: 1px solid #4d5666;
+            border-radius: 5px;
+            background: #141b26;
+            color: #dce7f5;
+            font-size: 11px;
+        }
+        .webui-bridge-size-field input {
+            width: 100%;
+            min-width: 0;
+            height: 22px;
+            padding: 0 4px;
+            box-sizing: border-box;
+            border: 1px solid #566a85;
+            border-radius: 4px;
+            background: #0d131d;
+            color: #f4f7fb;
+            font-size: 11px;
         }
         .webui-bridge-size-controls button {
             height: 28px;
@@ -15556,6 +15944,8 @@ app.registerExtension({
             this.color = "#2f3a4a";
             this.bgcolor = "#1b222d";
             this.__webuiBridgeFreshNode = true;
+            this.__webuiBridgeUserSized = false;
+            this.__webuiBridgeFreshLayoutStabilizeUntil = (performance?.now?.() || Date.now()) + 2200;
             this.__webuiBridgeDesiredSize = clampPanelSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT);
             this.__webuiBridgeSavedPanelSize = null;
             this.size = [...this.__webuiBridgeDesiredSize];
@@ -15564,6 +15954,7 @@ app.registerExtension({
         });
         chainCallback(nodeType.prototype, "onConfigure", function (data) {
             this.__webuiBridgeWasConfigured = true;
+            this.__webuiBridgeFreshLayoutStabilizeUntil = 0;
             if (Array.isArray(data?.widgets_values)) {
                 const repaired = sanitizeBridgeWidgetsValues(data.widgets_values);
                 if (repaired.changed) data.widgets_values = repaired.values;
@@ -15571,9 +15962,11 @@ app.registerExtension({
             } else {
                 this.__webuiBridgeUnknownWidgetValues = [];
             }
-            if (looksLikeSavedUserBridgePanelSize(data?.size)) {
+            const repairConfiguredSize = shouldRepairBridgePanelSize(data?.size);
+            if (looksLikeSavedUserBridgePanelSize(data?.size) || repairConfiguredSize) {
                 this.__webuiBridgeSavedPanelSize = normalizeBridgePanelSize(data.size);
                 this.__webuiBridgeDesiredSize = [...this.__webuiBridgeSavedPanelSize];
+                this.__webuiBridgeRepairedPanelSize = repairConfiguredSize;
                 this.__webuiBridgePreferConfiguredPanelSizeUntil = (performance?.now?.() || Date.now()) + WORKFLOW_CONFIGURED_SIZE_LOCK_MS;
                 if (Math.round(Number(this.size?.[0] || 0)) !== this.__webuiBridgeSavedPanelSize[0] ||
                     Math.round(Number(this.size?.[1] || 0)) !== this.__webuiBridgeSavedPanelSize[1]) {
@@ -15587,6 +15980,7 @@ app.registerExtension({
                 }
             } else {
                 this.__webuiBridgeSavedPanelSize = null;
+                this.__webuiBridgeRepairedPanelSize = false;
                 this.__webuiBridgePreferConfiguredPanelSizeUntil = 0;
                 this.__webuiBridgeDesiredSize = clampPanelSize(DEFAULT_PANEL_WIDTH, DEFAULT_PANEL_HEIGHT);
             }
