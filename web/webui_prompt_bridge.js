@@ -116,6 +116,24 @@ const DOM_WIDGET_LAYOUT_PAD = 128;
 const DOM_WIDGET_PANEL_PAD = 14;
 const WORKFLOW_LAYOUT_REPAIR_DELAYS = [0, 32, 120, 360, 900, 1600, 3200, 6500];
 const WORKFLOW_CONFIGURED_SIZE_LOCK_MS = 6000;
+const WORKFLOW_CONTROL_SWITCH_TITLES = [
+    "高清放大开关 / HiRes ON",
+    "面部修复开关 / Face Detail ON",
+    "手部精修开关 / Hand Detail ON",
+    "模型超分开关 / Model Upscale ON",
+    "参考图引导开关 / Reference Image ON",
+    "Qwen Union 姿势控制 / Pose Control ON",
+    "后期倍率缩放 / Pixel Scale ON",
+    "目标总像素 / Target MP ON",
+    "固定尺寸输出 / Fixed Size ON",
+];
+const WORKFLOW_CONTROL_SWITCH_TITLE_SET = new Set(WORKFLOW_CONTROL_SWITCH_TITLES);
+const WORKFLOW_CONTROL_SWITCH_MIN_COUNT = 4;
+const WORKFLOW_CONTROL_SWITCH_GAP = 48;
+const WORKFLOW_CONTROL_RIGHT_COLUMN_GAP = 40;
+const WORKFLOW_CONTROL_REPAIR_OVERLAP_TOLERANCE = 96;
+const WORKFLOW_CONTROL_MIN_SWITCH_WIDTH = 360;
+const WORKFLOW_CONTROL_TINY_NODE_TYPES = new Set(["SetNode", "GetNode"]);
 const WEBUI_STATUS_TIMEOUT_MS = 12000;
 const WEBUI_CONNECT_TIMEOUT_MS = 45000;
 const WEBUI_REFRESH_TIMEOUT_MS = 12000;
@@ -125,6 +143,7 @@ const EXTRA_NETWORKS_CARD_ROW_MIN_HEIGHT = 72;
 const PANEL_SPLIT_GRIP_HEIGHT = 22;
 const COLLAPSED_NEGATIVE_SPLIT_GRIP_HEIGHT = 22;
 const EXTRA_NETWORKS_MAX_HEIGHT = PANEL_MAX_HEIGHT;
+const EXTRA_NETWORKS_INLINE_MAX_HEIGHT = 520;
 const DEFAULT_REGIONAL_CANVAS_WIDTH = 1024;
 const DEFAULT_REGIONAL_CANVAS_HEIGHT = 1024;
 const REGIONAL_WIDTH_ALIASES = [
@@ -145,7 +164,7 @@ const REGIONAL_HEIGHT_ALIASES = [
     "resize_height",
     "crop_height",
 ];
-const LAYOUT_STORAGE_VERSION = "2026-06-20-dom-widget-top-v2";
+const LAYOUT_STORAGE_VERSION = "2026-06-23-lora-scroll-v1";
 const AIO_POSITIVE_MIN_HEIGHT = 180;
 const AIO_NEGATIVE_MIN_HEIGHT = 220;
 const NODE_TUTORIAL_SEEN_KEY = "webui-bridge-node-tutorial-seen-v2";
@@ -725,6 +744,8 @@ function createHeightResizeGrip(target, storageKey, { min = 48, max = 640, title
             };
             const onUp = () => {
                 grip.classList.remove("dragging");
+                const ownerPanel = target?.closest?.(".webui-bridge-panel") || grip.closest?.(".webui-bridge-panel");
+                ownerPanel?.__webuiBridgeHandleSectionResizeEnd?.({ target, grip });
                 document.removeEventListener("pointermove", onMove, true);
                 document.removeEventListener("pointerup", onUp, true);
                 document.removeEventListener("pointercancel", onUp, true);
@@ -807,6 +828,10 @@ function createHeightSplitGrip(beforeTarget, afterTarget, beforeKey, afterKey, o
             const onUp = () => {
                 grip.classList.remove("dragging");
                 options.onDragEnd?.();
+                const ownerPanel = before?.closest?.(".webui-bridge-panel") ||
+                    after?.closest?.(".webui-bridge-panel") ||
+                    grip.closest?.(".webui-bridge-panel");
+                ownerPanel?.__webuiBridgeHandleSectionResizeEnd?.({ before, after, grip, moved });
                 document.removeEventListener("pointermove", onMove, true);
                 document.removeEventListener("pointerup", onUp, true);
                 document.removeEventListener("pointercancel", onUp, true);
@@ -1350,6 +1375,7 @@ function installBridgeCanvasPointerRecovery() {
     if (document.__webuiBridgeCanvasPointerRecoveryInstalled) return;
     document.__webuiBridgeCanvasPointerRecoveryInstalled = true;
     const recover = (event) => {
+        if (bridgeCanvasEventPathIncludes(event, app?.canvas?.canvas)) return;
         if ((event.type === "pointerup" || event.type === "mouseup" || event.type === "pointercancel") &&
             document.__webuiBridgeCanvasPointerRelay) {
             return;
@@ -1675,12 +1701,169 @@ function repairBridgePanelLayoutAfterWorkflow(node, reason = "workflow") {
 
 function scheduleBridgePanelLayoutRepairForGraph(reason = "workflow") {
     const repair = () => {
-        visitBridgeNodes(getAppGraphSafe(), (node) => repairBridgePanelLayoutAfterWorkflow(node, reason));
+        const graph = getAppGraphSafe();
+        visitBridgeNodes(graph, (node) => repairBridgePanelLayoutAfterWorkflow(node, reason));
+        repairWorkflowControlToggleLayoutForGraph(graph, reason);
     };
     repair();
     for (const delay of WORKFLOW_LAYOUT_REPAIR_DELAYS) {
         window.setTimeout?.(repair, delay);
     }
+}
+
+function workflowNodePosX(node) {
+    return Number(node?.pos?.[0]);
+}
+
+function workflowNodePosY(node) {
+    return Number(node?.pos?.[1]);
+}
+
+function workflowNodeWidth(node, fallback = 0) {
+    return Math.max(fallback, Number(node?.size?.[0]) || fallback);
+}
+
+function workflowNodeHeight(node, fallback = 0) {
+    return Math.max(fallback, Number(node?.size?.[1]) || fallback);
+}
+
+function workflowNodeIntersectsY(node, minY, maxY) {
+    const y = workflowNodePosY(node);
+    if (!Number.isFinite(y)) return false;
+    const height = workflowNodeHeight(node, 40);
+    return y + height >= minY && y <= maxY;
+}
+
+function moveWorkflowNodeX(node, nextX) {
+    if (!node?.pos || !Number.isFinite(nextX)) return 0;
+    const currentX = workflowNodePosX(node);
+    if (!Number.isFinite(currentX) || Math.abs(currentX - nextX) < 1) return 0;
+    node.pos[0] = Math.round(nextX);
+    return 1;
+}
+
+function ensureWorkflowNodeMinWidth(node, minWidth) {
+    if (!node?.size) return 0;
+    const currentWidth = workflowNodeWidth(node);
+    if (currentWidth >= minWidth) return 0;
+    node.size[0] = minWidth;
+    return 1;
+}
+
+function isWorkflowControlSwitchNode(node) {
+    return node?.type === "ImpactBoolean" &&
+        WORKFLOW_CONTROL_SWITCH_TITLE_SET.has(String(node.title || ""));
+}
+
+function isWorkflowTinySetGetNode(node) {
+    if (!WORKFLOW_CONTROL_TINY_NODE_TYPES.has(String(node?.type || ""))) return false;
+    return workflowNodeWidth(node, 18) <= 90 && workflowNodeHeight(node, 12) <= 70;
+}
+
+function roundWorkflowLayoutX(value) {
+    return Math.ceil(value / 20) * 20;
+}
+
+function repairWorkflowControlToggleLayoutInNodeList(nodes) {
+    if (!Array.isArray(nodes)) return 0;
+    const bridgeNode = nodes.find((node) => node?.type === TARGET_NODE && Number.isFinite(workflowNodePosX(node)));
+    const switchNodes = nodes.filter(isWorkflowControlSwitchNode);
+    if (!bridgeNode || switchNodes.length < WORKFLOW_CONTROL_SWITCH_MIN_COUNT) return 0;
+
+    const switchXs = switchNodes.map(workflowNodePosX).filter(Number.isFinite);
+    const switchYs = switchNodes.map(workflowNodePosY).filter(Number.isFinite);
+    if (!switchXs.length || !switchYs.length) return 0;
+
+    const currentSwitchX = Math.min(...switchXs);
+    const maxSwitchWidth = Math.max(...switchNodes.map((node) => workflowNodeWidth(node, WORKFLOW_CONTROL_MIN_SWITCH_WIDTH)), WORKFLOW_CONTROL_MIN_SWITCH_WIDTH);
+    const bridgeRight = workflowNodePosX(bridgeNode) + workflowNodeWidth(bridgeNode, DEFAULT_PANEL_WIDTH);
+    if (!Number.isFinite(bridgeRight)) return 0;
+
+    const desiredSwitchX = roundWorkflowLayoutX(bridgeRight + WORKFLOW_CONTROL_SWITCH_GAP);
+    const switchDeltaX = Math.max(0, desiredSwitchX - currentSwitchX);
+    const switchColumnTouchesBridge = currentSwitchX < bridgeRight + WORKFLOW_CONTROL_SWITCH_GAP &&
+        currentSwitchX + maxSwitchWidth > bridgeRight - WORKFLOW_CONTROL_REPAIR_OVERLAP_TOLERANCE;
+    const shouldMigrateColumns = switchDeltaX > 0 && switchColumnTouchesBridge;
+    const yMin = Math.min(...switchYs) - 80;
+    const yMax = Math.max(...switchNodes.map((node) => workflowNodePosY(node) + workflowNodeHeight(node, 58))) + 520;
+    const oldRightColumnStart = currentSwitchX + maxSwitchWidth - 20;
+    const newRightColumnStart = desiredSwitchX + maxSwitchWidth + WORKFLOW_CONTROL_RIGHT_COLUMN_GAP;
+    const rightColumnDeltaX = shouldMigrateColumns ? Math.max(0, newRightColumnStart - oldRightColumnStart) : 0;
+    let changed = 0;
+
+    const nearTinyNodes = nodes.filter((node) => {
+        const x = workflowNodePosX(node);
+        return isWorkflowTinySetGetNode(node) &&
+            Number.isFinite(x) &&
+            workflowNodeIntersectsY(node, yMin, yMax) &&
+            x >= currentSwitchX + 180 &&
+            x <= currentSwitchX + maxSwitchWidth + 90;
+    });
+
+    if (shouldMigrateColumns) {
+        for (const node of switchNodes) {
+            changed += moveWorkflowNodeX(node, workflowNodePosX(node) + switchDeltaX);
+            changed += ensureWorkflowNodeMinWidth(node, WORKFLOW_CONTROL_MIN_SWITCH_WIDTH);
+        }
+    } else {
+        for (const node of switchNodes) {
+            changed += ensureWorkflowNodeMinWidth(node, WORKFLOW_CONTROL_MIN_SWITCH_WIDTH);
+        }
+    }
+
+    const tinyTargetX = desiredSwitchX + maxSwitchWidth + 24;
+    if (shouldMigrateColumns) {
+        for (const node of nearTinyNodes) {
+            changed += moveWorkflowNodeX(node, tinyTargetX);
+        }
+    }
+
+    if (rightColumnDeltaX > 0) {
+        const switchSet = new Set(switchNodes);
+        const tinySet = new Set(nearTinyNodes);
+        for (const node of nodes) {
+            if (switchSet.has(node) || tinySet.has(node) || node === bridgeNode) continue;
+            const x = workflowNodePosX(node);
+            if (!Number.isFinite(x)) continue;
+            if (!workflowNodeIntersectsY(node, yMin, yMax)) continue;
+            if (x < oldRightColumnStart || x > oldRightColumnStart + 1200) continue;
+            changed += moveWorkflowNodeX(node, x + rightColumnDeltaX);
+        }
+    }
+
+    return changed;
+}
+
+function repairWorkflowControlToggleLayoutInWorkflowData(data) {
+    if (!data || typeof data !== "object") return 0;
+    let changed = repairWorkflowControlToggleLayoutInNodeList(data.nodes);
+    for (const subgraph of data.definitions?.subgraphs || []) {
+        changed += repairWorkflowControlToggleLayoutInNodeList(subgraph?.nodes);
+    }
+    return changed;
+}
+
+function moveWorkflowControlSwitchesToFront(graph) {
+    const nodes = graph?._nodes || graph?.nodes;
+    if (!Array.isArray(nodes)) return 0;
+    const switches = nodes.filter(isWorkflowControlSwitchNode);
+    if (!switches.length) return 0;
+    const tail = nodes.slice(-switches.length);
+    if (tail.length === switches.length && tail.every((node, index) => node === switches[index])) return 0;
+    const switchSet = new Set(switches);
+    const remaining = nodes.filter((node) => !switchSet.has(node));
+    nodes.length = 0;
+    nodes.push(...remaining, ...switches);
+    return 1;
+}
+
+function repairWorkflowControlToggleLayoutForGraph(graph, reason = "workflow") {
+    const nodes = graph?._nodes || graph?.nodes;
+    const changed = repairWorkflowControlToggleLayoutInNodeList(nodes) + moveWorkflowControlSwitchesToFront(graph);
+    if (!changed) return 0;
+    markGraphChanged();
+    console.info(`[WebUI Prompt Bridge] Repaired workflow control toggle layout (${reason}, ${changed} changes).`);
+    return changed;
 }
 
 function shouldHideNativeWidget(widget) {
@@ -4283,7 +4466,7 @@ function scheduleStaleMissingNodeWarningClear(reason = "scheduled") {
 
 function sanitizeComfyCorePackageMetadataInWorkflowData(data) {
     if (!data || typeof data !== "object") return 0;
-    let changed = 0;
+    let changed = repairWorkflowControlToggleLayoutInWorkflowData(data);
     const cleanNodes = (nodes) => {
         if (!Array.isArray(nodes)) return;
         for (const nodeData of nodes) {
@@ -4380,6 +4563,11 @@ function installWorkflowLoadSanitizer() {
     if (typeof app.loadGraphData === "function") {
         const originalLoadGraphData = app.loadGraphData.bind(app);
         app.loadGraphData = async function (graphData, ...args) {
+            if (graphData === undefined || graphData === null) {
+                const result = await originalLoadGraphData();
+                scheduleBridgePanelLayoutRepairForGraph("loadGraphData-empty");
+                return result;
+            }
             sanitizeComfyCorePackageMetadataInWorkflowData(graphData);
             const result = await originalLoadGraphData(graphData, ...args);
             scheduleBridgePanelLayoutRepairForGraph("loadGraphData");
@@ -6439,7 +6627,9 @@ function createPromptRow(label, value, placeholder, onFocus, onInput, options = 
         for (const part of [textarea, chips, textChipGrip, chipBottomGrip, counter]) {
             if (part) part.style.display = collapsed ? "none" : "";
         }
-        row?.closest?.(".webui-bridge-panel")?.__webuiBridgeScheduleAdaptiveLayout?.();
+        const ownerPanel = row?.closest?.(".webui-bridge-panel");
+        ownerPanel?.__webuiBridgeHandlePromptCollapseChange?.({ collapsed, row });
+        ownerPanel?.__webuiBridgeScheduleAdaptiveLayout?.();
     };
     if (options.collapsible) {
         collapseButton = el("button", {
@@ -8796,6 +8986,7 @@ function buildPanel(node) {
     const setStatus = (message, options = {}) => {
         window.clearTimeout(statusTimer);
         status.textContent = message || "";
+        status.title = message || "";
         status.classList.toggle("visible", Boolean(message));
         status.classList.toggle("error", options.kind === "error");
         status.classList.toggle("success", options.kind === "success");
@@ -11022,6 +11213,7 @@ function buildPanel(node) {
     let promptInnerSplitManual = false;
     let manualResizeSettleTimer = 0;
     let bottomFitReleaseTimer = 0;
+    let settleBottomBlankAfterSectionResize = () => {};
     const freshInitialLayoutStabilizing = () => node.__webuiBridgeFreshNode &&
         !node.__webuiBridgeWasConfigured &&
         !node.__webuiBridgeUserSized &&
@@ -11093,6 +11285,7 @@ function buildPanel(node) {
         manualResizeSettleTimer = window.setTimeout?.(() => {
             manualResizeSettleTimer = 0;
             settleManualResizeLayout?.();
+            settleBottomBlankAfterSectionResize?.({ force: true, shrinkNode: true });
         }, 120) || 0;
     };
     const resizeNode = (deltaWidth, deltaHeight) => {
@@ -11594,7 +11787,7 @@ function buildPanel(node) {
     extraSection.addEventListener("dragstart", stopExtraPointerBubble, true);
     extraSection.__webuiBridgeHeightKey = extraHeightKey;
     extraSection.__webuiBridgeMinHeight = EXTRA_NETWORKS_MIN_HEIGHT;
-    extraSection.__webuiBridgeMaxHeight = EXTRA_NETWORKS_MAX_HEIGHT;
+    extraSection.__webuiBridgeMaxHeight = EXTRA_NETWORKS_INLINE_MAX_HEIGHT;
     resizeExtraWithNode = (deltaHeight) => {
         if (!deltaHeight || extraCollapsed || loraOverlayOpen || !extraSection?.isConnected) return;
         const currentHeight = resizeTargetLayoutHeight(extraSection) || EXTRA_NETWORKS_MIN_HEIGHT;
@@ -11973,7 +12166,7 @@ function buildPanel(node) {
             beforeMin: getTopRowVisibleMinHeight,
             beforeMax: getTopRowVisibleMaxHeight,
             afterMin: getExtraVisibleFloor,
-            afterMax: EXTRA_NETWORKS_MAX_HEIGHT,
+            afterMax: () => extraSection.__webuiBridgeMaxHeight || EXTRA_NETWORKS_INLINE_MAX_HEIGHT,
             afterFlex: "0 0 auto",
             label: "提示词 / LoRA",
             title: "上下拖动分配提示词区域和 Extra Networks 高度，双击恢复",
@@ -11991,6 +12184,12 @@ function buildPanel(node) {
         extraSection,
         resizeGrip,
     ]);
+    panel.__webuiBridgeHandleSectionResizeEnd = () => {
+        holdPromptInnerFit();
+        holdPromptSplitFit();
+        scheduleManualResizeSettle();
+        settleBottomBlankAfterSectionResize?.({ force: true, shrinkNode: true });
+    };
     node.__webuiBridgeHandleExternalNodeResize = ({ previousHeight, height } = {}) => {
         if (!panel?.isConnected) return;
         releaseFreshInitialLayout();
@@ -12070,9 +12269,12 @@ function buildPanel(node) {
         const hasLargeBottomBlank = panelHeight && panel ? bottomGap.largeBottomBlank : false;
         const shouldFillAvailable = fillAvailable &&
             ((!promptLoraSplitManual && !promptInnerSplitManual) || hasLargeBottomBlank);
+        const availableExtraTarget = Number.isFinite(availableExtraHeight) && availableExtraHeight > 0
+            ? availableExtraHeight
+            : nextHeight;
         const cappedHeight = shouldFillAvailable
-            ? Math.max(nextHeight, availableExtraHeight || nextHeight)
-            : Math.min(nextHeight, Math.max(EXTRA_NETWORKS_MIN_HEIGHT, availableExtraHeight || nextHeight));
+            ? availableExtraTarget
+            : Math.min(nextHeight, Math.max(EXTRA_NETWORKS_MIN_HEIGHT, availableExtraTarget));
         const targetHeight = Math.max(EXTRA_NETWORKS_CARD_ROW_MIN_HEIGHT, cappedHeight);
         const currentHeight = resizeTargetLayoutHeight(extraSection) || 0;
         const availableHeight = Math.max(EXTRA_NETWORKS_MIN_HEIGHT, availableExtraHeight || targetHeight);
@@ -12159,14 +12361,41 @@ function buildPanel(node) {
         };
     };
 
-    const fillExtraSectionToPanelBottom = () => {
+    const reclaimNodeBottomBlank = ({ force = false } = {}) => {
+        if (loraOverlayOpen || !panel?.isConnected || !extraSection?.isConnected) return;
+        const run = () => {
+            if (loraOverlayOpen || !panel?.isConnected || !extraSection?.isConnected) return;
+            const bottomGap = getExtraSectionBottomGapMetrics();
+            const blankLayout = bottomGap.blank / (bottomGap.viewportScale || 1);
+            const panelHeight = resizeTargetLayoutHeight(panel) || 0;
+            const shrinkThreshold = Math.max(32, panelHeight * 0.04);
+            if (!force && blankLayout <= shrinkThreshold) return;
+            if (blankLayout <= 2) return;
+            const currentWidth = node.size?.[0] || node.__webuiBridgeDesiredSize?.[0] || DEFAULT_PANEL_WIDTH;
+            const currentHeight = node.size?.[1] || node.__webuiBridgeDesiredSize?.[1] || DEFAULT_PANEL_HEIGHT;
+            const minimumHeight = Math.max(node.__webuiBridgeMinNodeHeight?.() || PANEL_MIN_HEIGHT, PANEL_MIN_HEIGHT);
+            const nextHeight = Math.max(minimumHeight, Math.floor(currentHeight - blankLayout));
+            if (currentHeight - nextHeight < 2) return;
+            setNodeSize(currentWidth, nextHeight, { user: true });
+            window.requestAnimationFrame?.(scheduleAdaptiveLayout);
+        };
+        window.requestAnimationFrame?.(() => window.requestAnimationFrame?.(run));
+    };
+
+    panel.__webuiBridgeHandlePromptCollapseChange = () => {
+        scheduleAdaptiveLayout();
+        reclaimNodeBottomBlank({ force: true });
+    };
+
+    const fillExtraSectionToPanelBottom = ({ force = false } = {}) => {
         if (extraCollapsed || loraOverlayOpen || !panel?.isConnected || !extraSection?.isConnected) return;
-        if (sectionAutoFitSuspended()) return;
+        if (!force && sectionAutoFitSuspended()) return;
         const activePreset = state.settings?.layout_preset || "default";
         const canGrow = !promptLoraSplitManual && (activePreset === "default" || activePreset === "roomy");
         const bottomGap = getExtraSectionBottomGapMetrics();
-        if (bottomGap.blank > bottomGap.settleTolerance && !canGrow && !bottomGap.largeBottomBlank) return;
-        if (Math.abs(bottomGap.blank) <= bottomGap.settleTolerance && !bottomGap.largeBottomBlank) return;
+        if (!force && bottomGap.blank > bottomGap.settleTolerance && !canGrow && !bottomGap.largeBottomBlank) return;
+        if (!force && Math.abs(bottomGap.blank) <= bottomGap.settleTolerance && !bottomGap.largeBottomBlank) return;
+        if (force && bottomGap.blank <= 2 && !bottomGap.largeBottomBlank) return;
         const currentHeight = resizeTargetLayoutHeight(extraSection) || EXTRA_NETWORKS_MIN_HEIGHT;
         const nextHeight = currentHeight + bottomGap.blank / bottomGap.viewportScale;
         setResizeTargetHeight(extraSection, extraHeightKey, nextHeight, {
@@ -12174,6 +12403,20 @@ function buildPanel(node) {
             max: extraSection.__webuiBridgeMaxHeight || EXTRA_NETWORKS_MAX_HEIGHT,
         });
         extraSection.style.flex = "0 0 auto";
+    };
+
+    settleBottomBlankAfterSectionResize = ({ force = false, shrinkNode = false } = {}) => {
+        if (extraCollapsed || loraOverlayOpen || !panel?.isConnected || !extraSection?.isConnected) return;
+        const run = () => {
+            if (extraCollapsed || loraOverlayOpen || !panel?.isConnected || !extraSection?.isConnected) return;
+            fillExtraSectionToPanelBottom({ force });
+            window.requestAnimationFrame?.(() => {
+                if (extraCollapsed || loraOverlayOpen || !panel?.isConnected || !extraSection?.isConnected) return;
+                fillExtraSectionToPanelBottom({ force });
+                if (shrinkNode) reclaimNodeBottomBlank({ force });
+            });
+        };
+        window.requestAnimationFrame?.(() => window.requestAnimationFrame?.(run));
     };
 
     const ensurePanelSplitterVisible = () => {
@@ -13212,6 +13455,7 @@ function addStyles() {
             align-content: flex-start;
             justify-content: flex-start;
             overflow: hidden auto;
+            overscroll-behavior: contain;
         }
         .webui-bridge-prompts.negative-collapsed {
             overflow: hidden auto;
@@ -13374,10 +13618,8 @@ function addStyles() {
             border-color: #6aa3ff;
         }
         .webui-bridge-positive-prompt-row {
-            position: sticky;
-            top: 0;
-            z-index: 15;
-            box-shadow: 0 6px 12px rgba(0, 0, 0, .22);
+            position: relative;
+            z-index: 1;
         }
         .webui-bridge-prompt-row.prompt-placement-error {
             border-color: #d84a4a;
@@ -14388,20 +14630,23 @@ function addStyles() {
             font: 13px/1.45 Consolas, Monaco, monospace;
         }
         .webui-bridge-status {
+            max-width: 100%;
             min-height: 0;
             padding: 0;
             border: 1px solid transparent;
             border-radius: 5px;
             color: #9fb1c7;
             font-size: 11px;
-            line-height: 1.35;
+            line-height: 1.2;
             opacity: 0;
             transition: opacity .16s ease;
-            overflow-wrap: anywhere;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
         .webui-bridge-status.visible {
             opacity: 1;
-            padding: 7px 8px;
+            padding: 5px 8px;
             border-color: #3d495c;
             background: #111824;
         }
@@ -14427,6 +14672,7 @@ function addStyles() {
             background: #2a2112;
         }
         .webui-bridge-status.has-actions {
+            white-space: normal;
             min-height: 72px;
         }
         .webui-bridge-status-action {
@@ -14611,6 +14857,7 @@ function addStyles() {
             height: 100%;
             padding: 6px 4px;
             overflow: auto;
+            overscroll-behavior: contain;
             border-right: 1px solid #3e4654;
             background: #141922;
         }
@@ -14674,6 +14921,7 @@ function addStyles() {
             height: 100%;
             flex: 1 1 auto;
             scrollbar-width: thin;
+            overscroll-behavior: contain;
         }
         .webui-bridge-card-grid.compact {
             grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
@@ -14758,23 +15006,28 @@ function addStyles() {
         }
         .webui-bridge-card-buttons {
             position: absolute;
-            top: 7px;
-            right: 7px;
+            top: 6px;
+            right: 6px;
             display: flex;
-            gap: 6px;
-            opacity: .92;
+            gap: 4px;
+            opacity: .72;
             z-index: 2;
+            transition: opacity .14s ease;
+        }
+        .webui-bridge-card:hover .webui-bridge-card-buttons,
+        .webui-bridge-card:focus-within .webui-bridge-card-buttons {
+            opacity: 1;
         }
         .webui-bridge-card-buttons button {
-            width: 26px;
-            height: 26px;
+            width: 24px;
+            height: 24px;
             padding: 0;
             border: 1px solid rgba(255, 255, 255, .42);
             border-radius: 4px;
-            background: rgba(18, 24, 33, .72);
+            background: rgba(18, 24, 33, .78);
             color: #fff;
             cursor: pointer;
-            font: 700 14px/1 Arial, sans-serif;
+            font: 700 12px/1 Arial, sans-serif;
             text-shadow: 0 1px 2px rgba(0, 0, 0, .8);
             box-shadow: 0 2px 7px rgba(0, 0, 0, .35);
         }
@@ -14794,6 +15047,21 @@ function addStyles() {
             background: linear-gradient(to top, rgba(0, 0, 0, .78), rgba(0, 0, 0, .44));
             color: #fff;
             text-shadow: 0 1px 2px rgba(0, 0, 0, .85);
+        }
+        .webui-bridge-card-name,
+        .webui-bridge-card-category,
+        .webui-bridge-card-folder,
+        .webui-bridge-card-desc {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .webui-bridge-card-desc {
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            white-space: normal;
         }
         .webui-bridge-empty {
             grid-column: 1 / -1;
