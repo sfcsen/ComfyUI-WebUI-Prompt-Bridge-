@@ -1,21 +1,13 @@
 # ComfyUI WebUI Prompt Bridge v0.4.18
 
-本次更新继续修复 Bridge 面板布局恢复和本地缓存冲突问题，建议所有 v0.4.x 用户更新。
+本次更新继续修复 Bridge 面板布局恢复和本地缓存冲突问题。遇到过刷新后 Prompt 区变小、反向提示词自动折叠、LoRA 列表上移、恢复尺寸后底部留空的用户，建议更新。
 
 ## 更新内容
 
-- 修复 workflow 已保存展开布局时，被旧 localStorage 折叠状态覆盖，导致反向提示词折叠、LoRA 区上移的问题。
-- 用户在当前 workflow 里刚调整过的折叠状态、分区高度和侧栏状态，刷新页面后仍会保留。
-- `恢复尺寸` / `默认尺寸` 会重新套用当前布局预设的内部高度分配，避免节点恢复到 1180 高后底部留下大空白。
-- 增加真实浏览器回归检查，覆盖旧本地折叠状态不能覆盖 workflow 保存布局的场景。
-
-## 验证
-
-- `node --check web/webui_prompt_bridge.js`
-- `node --check tools/verify_frontend_compat.mjs`
-- `D:/ai/ComfyUI-aki-v1.6/ComfyUI-aki-v1.6/python/python.exe -m py_compile nodes.py`
-- `node tools/verify_frontend_compat.mjs --url=http://127.0.0.1:8188`
-- `git diff --check`
+- 打开已保存的 workflow 时，Bridge 会优先恢复 workflow 里保存的布局，不再被旧浏览器缓存里的折叠状态带偏。
+- 你刚刚手动调整过的反向提示词折叠、Prompt/LoRA 分区高度、侧栏状态，刷新当前页面后仍会保留。
+- `恢复尺寸` / `默认尺寸` 会同时整理节点内部布局，避免只恢复外框、里面留下大片空白。
+- LoRA 卡片区不应再因为旧状态冲突自动上移。
 
 ## 升级说明
 
