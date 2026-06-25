@@ -88,6 +88,23 @@ function assert(condition, message, details = null) {
     }
 }
 
+async function fetchBridgeSettings(baseUrl) {
+    const response = await fetch(`${baseUrl}/webui_prompt_bridge/settings`, { cache: "no-store" });
+    assert(response.ok, "Bridge settings GET failed", { status: response.status });
+    return await response.json();
+}
+
+async function saveBridgeSettingsForTest(baseUrl, settings) {
+    const response = await fetch(`${baseUrl}/webui_prompt_bridge/settings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(settings),
+    });
+    const text = await response.text();
+    assert(response.ok, "Bridge settings POST failed", { status: response.status, text });
+    return JSON.parse(text);
+}
+
 function workflowPositions(workflow, ids) {
     const positions = {};
     for (const id of ids) {
@@ -225,7 +242,7 @@ async function screenshot(page, name) {
     return file;
 }
 
-async function newComfyPage(browser, baseUrl, consoleMessages, viewport = { width: 1400, height: 1000 }) {
+async function newComfyPage(browser, baseUrl, consoleMessages, viewport = { width: 1400, height: 1000 }, beforeGoto = null) {
     const context = await browser.newContext({ viewport, deviceScaleFactor: 1 });
     const page = await context.newPage();
     page.on("console", (message) => {
@@ -234,6 +251,7 @@ async function newComfyPage(browser, baseUrl, consoleMessages, viewport = { widt
     page.on("pageerror", (error) => {
         consoleMessages.push({ type: "pageerror", text: String(error?.stack || error) });
     });
+    if (beforeGoto) await beforeGoto(page);
     await waitForComfy(page, baseUrl);
     return { context, page };
 }
@@ -777,6 +795,788 @@ async function verifyRestoreSizeStability(browser, baseUrl, workflow) {
     }
 }
 
+async function verifyFlatSavedBridgeSizeRepair(browser, baseUrl, workflow) {
+    const consoleMessages = [];
+    const { context, page } = await newComfyPage(browser, baseUrl, consoleMessages, { width: 1400, height: 1000 });
+    try {
+        const flatWorkflow = JSON.parse(JSON.stringify(workflow));
+        for (const node of flatWorkflow.nodes || []) {
+            if (node.type === "WebUIPromptBridge") {
+                node.size = [1180, 260];
+                break;
+            }
+        }
+        await page.evaluate(async (graphData) => {
+            await window.app.loadGraphData(graphData, true, true, undefined, {
+                filename: "flat-saved-bridge-size-repair.json",
+            });
+            window.app.canvas.ds.offset = [55, 35];
+            window.app.canvas.ds.scale = 1;
+            window.app.canvas.setDirty(true, true);
+        }, flatWorkflow);
+        await page.waitForTimeout(2800);
+        const report = await page.evaluate(() => {
+            const bridge = window.app.graph._nodes.find((node) => node.type === "WebUIPromptBridge");
+            const panel = document.querySelector(".webui-bridge-panel");
+            const canvasRect = document.querySelector("#graph-canvas").getBoundingClientRect();
+            const portPoints = bridge ? [
+                [bridge.pos[0] + 4, bridge.pos[1] + 80],
+                [bridge.pos[0] + bridge.size[0] - 4, bridge.pos[1] + 80],
+            ] : [];
+            const portHits = portPoints.map((point) => {
+                const canvasPoint = window.app.canvas.convertOffsetToCanvas(point);
+                const client = [canvasPoint[0] + canvasRect.left, canvasPoint[1] + canvasRect.top];
+                const dom = document.elementFromPoint(client[0], client[1]);
+                return {
+                    client,
+                    graphHitId: window.app.graph.getNodeOnPos(point[0], point[1], null, 0)?.id ?? null,
+                    blockedByPanel: Boolean(dom?.closest?.(".webui-bridge-panel")),
+                    dom: dom ? `${dom.tagName}.${String(dom.className || "").replace(/\s+/g, ".")}` : null,
+                };
+            });
+            return {
+                nodeSize: bridge?.size ? Array.from(bridge.size).map((value) => Math.round(value)) : null,
+                desiredSize: bridge?.__webuiBridgeDesiredSize ? Array.from(bridge.__webuiBridgeDesiredSize).map((value) => Math.round(value)) : null,
+                panelHeight: Math.round(panel?.getBoundingClientRect?.().height || 0),
+                portHits,
+            };
+        });
+        await screenshot(page, "compat-flat-saved-bridge-size-repair.png");
+        assert(report.nodeSize?.[0] >= 760 && report.nodeSize?.[1] >= 520, "Flat saved bridge size was not repaired", report);
+        assert(report.nodeSize?.[1] <= 1300, "Flat saved bridge size repair grew the node too tall", report);
+        assert(report.panelHeight >= 500, "Bridge panel remained visually squeezed after flat-size repair", report);
+        assert(report.portHits.every((hit) => hit.graphHitId !== null && !hit.blockedByPanel), "Bridge DOM panel covered a port hit area", report);
+        const bridgeConsoleErrors = consoleMessages.filter((message) =>
+            ["error", "pageerror"].includes(message.type) &&
+            /WebUI Prompt Bridge|WebUIPromptBridge|webui_prompt_bridge/i.test(message.text)
+        );
+        assert(bridgeConsoleErrors.length === 0, "WebUIPromptBridge reported console errors during flat-size repair check", bridgeConsoleErrors);
+        return {
+            nodeSize: report.nodeSize,
+            panelHeight: report.panelHeight,
+            bridgeConsoleErrors: bridgeConsoleErrors.length,
+        };
+    } finally {
+        await context.close();
+    }
+}
+
+async function verifyOversizedSavedBridgeSizeRepairAndPortGutters(browser, baseUrl, workflow) {
+    const consoleMessages = [];
+    const { context, page } = await newComfyPage(browser, baseUrl, consoleMessages, { width: 1600, height: 1200 });
+    try {
+        const oversizedWorkflow = JSON.parse(JSON.stringify(workflow));
+        for (const node of oversizedWorkflow.nodes || []) {
+            if (node.type === "WebUIPromptBridge") {
+                node.size = [1337, 1988];
+                break;
+            }
+        }
+        await page.evaluate(async (graphData) => {
+            await window.app.loadGraphData(graphData, true, true, undefined, {
+                filename: "oversized-saved-bridge-size-repair.json",
+            });
+            window.app.canvas.ds.offset = [80, 60];
+            window.app.canvas.ds.scale = 1;
+            window.app.canvas.setDirty(true, true);
+        }, oversizedWorkflow);
+        await page.waitForTimeout(3000);
+        const report = await page.evaluate(() => {
+            const bridge = window.app.graph._nodes.find((node) => node.type === "WebUIPromptBridge");
+            const panel = document.querySelector(".webui-bridge-panel");
+            const root = panel?.parentElement;
+            const canvasRect = document.querySelector("#graph-canvas").getBoundingClientRect();
+            const scale = window.app.canvas.ds.scale || 1;
+            const nodeLeft = bridge ? canvasRect.left + (bridge.pos[0] + window.app.canvas.ds.offset[0]) * scale : 0;
+            const nodeRight = bridge ? canvasRect.left + (bridge.pos[0] + bridge.size[0] + window.app.canvas.ds.offset[0]) * scale : 0;
+            const panelRect = panel?.getBoundingClientRect?.();
+            const rootRect = root?.getBoundingClientRect?.();
+            return {
+                nodeSize: bridge?.size ? Array.from(bridge.size).map((value) => Math.round(value)) : null,
+                desiredSize: bridge?.__webuiBridgeDesiredSize ? Array.from(bridge.__webuiBridgeDesiredSize).map((value) => Math.round(value)) : null,
+                panelRect: panelRect ? {
+                    left: Math.round(panelRect.left),
+                    right: Math.round(panelRect.right),
+                    width: Math.round(panelRect.width),
+                    height: Math.round(panelRect.height),
+                } : null,
+                rootRect: rootRect ? {
+                    left: Math.round(rootRect.left),
+                    right: Math.round(rootRect.right),
+                    width: Math.round(rootRect.width),
+                    height: Math.round(rootRect.height),
+                } : null,
+                leftGutter: Math.round((panelRect?.left || 0) - nodeLeft),
+                rightGutter: Math.round(nodeRight - (panelRect?.right || 0)),
+                inputLabelOutside: (() => {
+                    const rect = document.querySelector(".lg-node:has(.webui-bridge-panel) .lg-slot--input .text-node-component-slot-text")?.getBoundingClientRect?.();
+                    return rect ? Math.round(rect.right - nodeLeft) <= -8 : null;
+                })(),
+                outputLabelOutside: (() => {
+                    const rect = document.querySelector(".lg-node:has(.webui-bridge-panel) .lg-slot--output .text-node-component-slot-text")?.getBoundingClientRect?.();
+                    return rect ? Math.round(rect.left - nodeRight) >= 8 : null;
+                })(),
+                externalSlotLabels: [...document.querySelectorAll(".webui-bridge-slot-label")]
+                    .map((label) => label.textContent || "")
+                    .filter(Boolean),
+            };
+        });
+        await screenshot(page, "compat-oversized-saved-bridge-size-repair.png");
+        assert(report.nodeSize?.[1] <= 1300, "Oversized saved bridge height was not repaired", report);
+        assert(report.leftGutter >= 14 && report.rightGutter >= 14, "Bridge panel did not leave port-dot gutters", report);
+        assert(report.leftGutter <= 28 && report.rightGutter <= 28, "Bridge panel still used wide internal port-label gutters", report);
+        assert(report.externalSlotLabels.includes("model") && report.externalSlotLabels.includes("positive_text"), "Bridge external port-label overlay did not render expected labels", report);
+        assert(report.inputLabelOutside !== false && report.outputLabelOutside !== false, "Bridge DOM port labels were not flipped outside the node", report);
+        assert(report.panelRect?.width >= 1120, "Bridge panel became too narrow after port labels were flipped outside", report);
+        const bridgeConsoleErrors = consoleMessages.filter((message) =>
+            ["error", "pageerror"].includes(message.type) &&
+            /WebUI Prompt Bridge|WebUIPromptBridge|webui_prompt_bridge/i.test(message.text)
+        );
+        assert(bridgeConsoleErrors.length === 0, "WebUIPromptBridge reported console errors during oversized repair check", bridgeConsoleErrors);
+        return {
+            nodeSize: report.nodeSize,
+            leftGutter: report.leftGutter,
+            rightGutter: report.rightGutter,
+            inputLabelOutside: report.inputLabelOutside,
+            outputLabelOutside: report.outputLabelOutside,
+            externalSlotLabels: report.externalSlotLabels.length,
+            panelWidth: report.panelRect?.width,
+            bridgeConsoleErrors: bridgeConsoleErrors.length,
+        };
+    } finally {
+        await context.close();
+    }
+}
+
+async function verifySidebarCollapsePersistenceAndSlotLabelCleanup(browser, baseUrl, workflow) {
+    const consoleMessages = [];
+    const { context, page } = await newComfyPage(browser, baseUrl, consoleMessages, { width: 1600, height: 1200 });
+    try {
+        const firstPass = await page.evaluate(async (graphData) => {
+            const collapseKey = "webui-bridge-action-column-collapsed";
+            const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const reportState = () => {
+                const bridge = window.app.graph._nodes.find((node) => node.type === "WebUIPromptBridge");
+                const topRow = document.querySelector(".webui-bridge-toprow");
+                const actionColumn = document.querySelector(".webui-bridge-action-column");
+                const toggle = document.querySelector(".webui-bridge-side-toggle");
+                const overlays = [...document.querySelectorAll(".webui-bridge-slot-label-overlay")];
+                const labels = [...document.querySelectorAll(".webui-bridge-slot-label")];
+                return {
+                    bridgeId: bridge?.id ?? null,
+                    collapsed: Boolean(topRow?.classList.contains("action-collapsed")),
+                    actionColumnHidden: Boolean(actionColumn?.classList.contains("collapsed")) ||
+                        (actionColumn ? getComputedStyle(actionColumn).display === "none" : null),
+                    toggleText: (toggle?.textContent || "").trim(),
+                    stored: localStorage.getItem(collapseKey),
+                    overlayCount: overlays.length,
+                    labelCount: labels.length,
+                    overlayNodeIds: overlays.map((overlay) => overlay.dataset.bridgeNodeId || ""),
+                    orphanOverlayCount: overlays.filter((overlay) => !overlay.dataset.bridgeNodeId || overlay.dataset.bridgeNodeId === "orphan").length,
+                    labelTexts: labels.map((label) => label.textContent || "").filter(Boolean),
+                };
+            };
+            localStorage.removeItem(collapseKey);
+            await window.app.loadGraphData(graphData, true, true, undefined, {
+                filename: "sidebar-collapse-overlay-cleanup.json",
+            });
+            window.app.canvas.ds.offset = [55, 35];
+            window.app.canvas.ds.scale = 1;
+            window.app.canvas.setDirty(true, true);
+            await wait(3200);
+            const initial = reportState();
+
+            const orphan = document.createElement("div");
+            orphan.className = "webui-bridge-slot-label-overlay";
+            orphan.dataset.bridgeNodeId = "orphan";
+            const orphanLabel = document.createElement("div");
+            orphanLabel.className = "webui-bridge-slot-label input";
+            orphanLabel.textContent = "model";
+            orphan.append(orphanLabel);
+            document.body.append(orphan);
+            await wait(700);
+            const afterOrphanCleanup = reportState();
+
+            const toggle = document.querySelector(".webui-bridge-side-toggle");
+            if ((toggle?.textContent || "").includes("隐藏")) toggle.click();
+            await wait(700);
+            const afterHide = reportState();
+
+            const movedGraph = JSON.parse(JSON.stringify(graphData));
+            for (const node of movedGraph.nodes || []) {
+                if (node.type === "WebUIPromptBridge" && Array.isArray(node.pos)) {
+                    node.pos = [Number(node.pos[0] || 0) + 420, Number(node.pos[1] || 0) + 180];
+                    break;
+                }
+            }
+            await window.app.loadGraphData(movedGraph, true, true, undefined, {
+                filename: "sidebar-collapse-overlay-cleanup-moved.json",
+            });
+            window.app.canvas.setDirty(true, true);
+            await wait(3200);
+            const afterMovedGraph = reportState();
+
+            return { initial, afterOrphanCleanup, afterHide, afterMovedGraph };
+        }, workflow);
+        await screenshot(page, "compat-sidebar-collapse-overlay-cleanup-before-reload.png");
+
+        await page.reload({ waitUntil: "domcontentloaded", timeout: 60000 });
+        await page.waitForFunction(() => Boolean(window.app?.graph && window.app?.canvas && window.LiteGraph), null, {
+            timeout: 60000,
+        });
+        const afterPageReload = await page.evaluate(async (graphData) => {
+            const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const collapseKey = "webui-bridge-action-column-collapsed";
+            await window.app.loadGraphData(graphData, true, true, undefined, {
+                filename: "sidebar-collapse-overlay-cleanup-page-reload.json",
+            });
+            window.app.canvas.ds.offset = [55, 35];
+            window.app.canvas.ds.scale = 1;
+            window.app.canvas.setDirty(true, true);
+            await wait(3200);
+            const bridge = window.app.graph._nodes.find((node) => node.type === "WebUIPromptBridge");
+            const topRow = document.querySelector(".webui-bridge-toprow");
+            const actionColumn = document.querySelector(".webui-bridge-action-column");
+            const toggle = document.querySelector(".webui-bridge-side-toggle");
+            const overlays = [...document.querySelectorAll(".webui-bridge-slot-label-overlay")];
+            const labels = [...document.querySelectorAll(".webui-bridge-slot-label")];
+            return {
+                bridgeId: bridge?.id ?? null,
+                collapsed: Boolean(topRow?.classList.contains("action-collapsed")),
+                actionColumnHidden: Boolean(actionColumn?.classList.contains("collapsed")) ||
+                    (actionColumn ? getComputedStyle(actionColumn).display === "none" : null),
+                toggleText: (toggle?.textContent || "").trim(),
+                stored: localStorage.getItem(collapseKey),
+                overlayCount: overlays.length,
+                labelCount: labels.length,
+                overlayNodeIds: overlays.map((overlay) => overlay.dataset.bridgeNodeId || ""),
+                orphanOverlayCount: overlays.filter((overlay) => !overlay.dataset.bridgeNodeId || overlay.dataset.bridgeNodeId === "orphan").length,
+                labelTexts: labels.map((label) => label.textContent || "").filter(Boolean),
+            };
+        }, workflow);
+        await screenshot(page, "compat-sidebar-collapse-overlay-cleanup-after-reload.png");
+
+        assert(firstPass.initial.overlayCount === 1, "Bridge slot label overlay did not start with a single active overlay", firstPass.initial);
+        assert(firstPass.initial.labelTexts.includes("model") && firstPass.initial.labelTexts.includes("positive_text"), "Bridge slot label overlay did not render expected labels", firstPass.initial);
+        assert(firstPass.afterOrphanCleanup.overlayCount === 1 && firstPass.afterOrphanCleanup.orphanOverlayCount === 0, "Orphan bridge slot label overlay was not cleaned up", firstPass.afterOrphanCleanup);
+        assert(firstPass.afterHide.collapsed && firstPass.afterHide.actionColumnHidden && firstPass.afterHide.stored === "1", "Sidebar collapsed state was not saved after clicking hide", firstPass.afterHide);
+        assert(firstPass.afterHide.toggleText === "显示侧栏", "Sidebar toggle text did not switch after hiding", firstPass.afterHide);
+        assert(firstPass.afterMovedGraph.collapsed && firstPass.afterMovedGraph.stored === "1", "Sidebar collapsed state did not survive graph reload", firstPass.afterMovedGraph);
+        assert(firstPass.afterMovedGraph.overlayCount === 1 && firstPass.afterMovedGraph.orphanOverlayCount === 0, "Bridge slot label overlays accumulated after graph reload", firstPass.afterMovedGraph);
+        assert(afterPageReload.collapsed && afterPageReload.actionColumnHidden && afterPageReload.stored === "1", "Sidebar collapsed state did not survive page reload", afterPageReload);
+        assert(afterPageReload.toggleText === "显示侧栏", "Sidebar toggle text did not restore after page reload", afterPageReload);
+        assert(afterPageReload.overlayCount === 1 && afterPageReload.orphanOverlayCount === 0, "Bridge slot label overlays accumulated after page reload", afterPageReload);
+        assert(afterPageReload.labelTexts.includes("model") && afterPageReload.labelTexts.includes("positive_text"), "Bridge slot labels disappeared after page reload", afterPageReload);
+        const bridgeConsoleErrors = consoleMessages.filter((message) =>
+            ["error", "pageerror"].includes(message.type) &&
+            /WebUI Prompt Bridge|WebUIPromptBridge|webui_prompt_bridge/i.test(message.text)
+        );
+        assert(bridgeConsoleErrors.length === 0, "WebUIPromptBridge reported console errors during sidebar/overlay cleanup check", bridgeConsoleErrors);
+        return {
+            overlayCount: afterPageReload.overlayCount,
+            labelCount: afterPageReload.labelCount,
+            collapsedAfterReload: afterPageReload.collapsed,
+            stored: afterPageReload.stored,
+            bridgeConsoleErrors: bridgeConsoleErrors.length,
+        };
+    } finally {
+        await context.close();
+    }
+}
+
+async function verifyPositiveTextareaManualHeightPersists(browser, baseUrl, workflow) {
+    const consoleMessages = [];
+    const { context, page } = await newComfyPage(browser, baseUrl, consoleMessages, { width: 1600, height: 1300 });
+    try {
+        const report = await page.evaluate(async (graphData) => {
+            localStorage.removeItem("webui-bridge-textarea-height-prompt");
+            await window.app.loadGraphData(graphData, true, true, undefined, {
+                filename: "positive-textarea-height-persistence.json",
+            });
+            window.app.canvas.ds.offset = [55, 35];
+            window.app.canvas.ds.scale = 1;
+            window.app.canvas.setDirty(true, true);
+            await new Promise((resolve) => setTimeout(resolve, 2200));
+            const textarea = document.querySelector(".webui-bridge-positive-prompt-row textarea");
+            if (!textarea) return { missingTextarea: true };
+            textarea.focus();
+            textarea.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerId: 1 }));
+            textarea.style.height = "260px";
+            textarea.style.flex = "0 0 auto";
+            textarea.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerId: 1 }));
+            const panel = document.querySelector(".webui-bridge-panel");
+            panel?.__webuiBridgeScheduleAdaptiveLayout?.();
+            await new Promise((resolve) => setTimeout(resolve, 900));
+            const afterManual = Math.round(textarea.getBoundingClientRect().height);
+            const storedAfterManual = localStorage.getItem("webui-bridge-textarea-height-prompt");
+            panel?.__webuiBridgeScheduleAdaptiveLayout?.();
+            await new Promise((resolve) => setTimeout(resolve, 900));
+            const afterAdaptive = Math.round(textarea.getBoundingClientRect().height);
+            const serialized = window.app.graph.serialize();
+            await window.app.loadGraphData(serialized, true, true, undefined, {
+                filename: "positive-textarea-height-persistence-reload.json",
+            });
+            await new Promise((resolve) => setTimeout(resolve, 2200));
+            const reloadedTextarea = document.querySelector(".webui-bridge-positive-prompt-row textarea");
+            return {
+                afterManual,
+                afterAdaptive,
+                afterReload: Math.round(reloadedTextarea?.getBoundingClientRect?.().height || 0),
+                storedAfterManual,
+            };
+        }, workflow);
+        await screenshot(page, "compat-positive-textarea-height-persistence.png");
+        assert(!report.missingTextarea, "Positive prompt textarea did not render", report);
+        assert(Number(report.storedAfterManual) >= 240, "Manual textarea height was not persisted to localStorage", report);
+        assert(report.afterManual >= 240 && report.afterAdaptive >= 240, "Adaptive layout pulled the positive textarea back down", report);
+        assert(report.afterReload >= 240, "Positive textarea height did not survive reload", report);
+        const bridgeConsoleErrors = consoleMessages.filter((message) =>
+            ["error", "pageerror"].includes(message.type) &&
+            /WebUI Prompt Bridge|WebUIPromptBridge|webui_prompt_bridge/i.test(message.text)
+        );
+        assert(bridgeConsoleErrors.length === 0, "WebUIPromptBridge reported console errors during textarea height persistence check", bridgeConsoleErrors);
+        return {
+            afterManual: report.afterManual,
+            afterAdaptive: report.afterAdaptive,
+            afterReload: report.afterReload,
+            bridgeConsoleErrors: bridgeConsoleErrors.length,
+        };
+    } finally {
+        await context.close();
+    }
+}
+
+async function verifyQuickLoraDefaultVisibility(browser, baseUrl, workflow) {
+    const consoleMessages = [];
+    const { context, page } = await newComfyPage(browser, baseUrl, consoleMessages, { width: 1600, height: 1300 }, async (setupPage) => {
+        await setupPage.route("**/webui_prompt_bridge/settings", async (route) => {
+            await route.fulfill({
+                status: 200,
+                contentType: "application/json",
+                body: JSON.stringify({
+                    settings: {
+                        data_source: "auto",
+                        translation_source: "auto",
+                        tag_translation_source: "auto",
+                        show_startup_wizard: false,
+                        layout_preset: "default",
+                        tag_display: "local_first",
+                        lora_card_size: "normal",
+                        node_tutorial_popup: "off",
+                    },
+                    custom_tag_count: 0,
+                    assets: null,
+                    module_assets: null,
+                }),
+            });
+        });
+    });
+    try {
+        const report = await page.evaluate(async (graphData) => {
+            await window.app.loadGraphData(graphData, true, true, undefined, {
+                filename: "quick-lora-default-visibility.json",
+            });
+            window.app.canvas.ds.offset = [55, 35];
+            window.app.canvas.ds.scale = 1;
+            window.app.canvas.setDirty(true, true);
+            await new Promise((resolve) => setTimeout(resolve, 2200));
+            const topButtons = [...document.querySelectorAll(".webui-bridge-top-controls button")]
+                .map((button) => ({
+                    text: (button.textContent || "").trim(),
+                    title: button.title || "",
+                    hidden: button.classList.contains("webui-bridge-ui-hidden") ||
+                        getComputedStyle(button).display === "none" ||
+                        getComputedStyle(button).visibility === "hidden",
+                }));
+            const settingsButton = [...document.querySelectorAll(".webui-bridge-top-controls button")]
+                .find((button) => (button.textContent || "").trim() === "设置");
+            settingsButton?.click();
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            const visibilityChecks = [...document.querySelectorAll(".webui-bridge-visibility-check")]
+                .map((label) => ({
+                    text: (label.textContent || "").trim(),
+                    checked: Boolean(label.querySelector("input")?.checked),
+                }));
+            const settingsText = document.querySelector(".webui-bridge-settings-panel")?.textContent || "";
+            return {
+                topButtons,
+                quickButton: topButtons.find((button) => button.text === "快速添加 LoRA") || null,
+                oldTopButton: topButtons.find((button) => button.text === "添加 LoRA") || null,
+                quickVisibilityCheck: visibilityChecks.find((item) => item.text === "快速添加 LoRA") || null,
+                settingsHasOldLabel: /顶部添加 LoRA/.test(settingsText),
+            };
+        }, workflow);
+        await screenshot(page, "compat-quick-lora-default-visibility.png");
+        assert(report.quickButton, "Quick LoRA top button did not render with the new label", report);
+        assert(!report.quickButton.hidden, "Quick LoRA top button was not enabled by default", report);
+        assert(/快速添加 LoRA/.test(report.quickButton.title), "Quick LoRA button tooltip did not use the new wording", report);
+        assert(!report.oldTopButton, "Old top LoRA button label is still present", report);
+        assert(report.quickVisibilityCheck?.checked === true, "Quick LoRA visibility setting was not checked by default", report);
+        assert(!report.settingsHasOldLabel, "Old visibility label is still present in settings", report);
+        const bridgeConsoleErrors = consoleMessages.filter((message) =>
+            ["error", "pageerror"].includes(message.type) &&
+            /WebUI Prompt Bridge|WebUIPromptBridge|webui_prompt_bridge/i.test(message.text)
+        );
+        assert(bridgeConsoleErrors.length === 0, "WebUIPromptBridge reported console errors during Quick LoRA default check", bridgeConsoleErrors);
+        return {
+            quickButton: report.quickButton.text,
+            quickVisibilityChecked: report.quickVisibilityCheck?.checked,
+            bridgeConsoleErrors: bridgeConsoleErrors.length,
+        };
+    } finally {
+        await context.close();
+    }
+}
+
+async function verifyVisibilitySettingsPersistAcrossReload(browser, baseUrl, workflow) {
+    const originalResponse = await fetchBridgeSettings(baseUrl);
+    const originalSettings = originalResponse.settings || {};
+    const originalVisibility = originalSettings.ui_visibility || {};
+    const seededSettings = {
+        ...originalSettings,
+        ui_visibility: {
+            ...originalVisibility,
+            top_lora: true,
+            top_clip: false,
+            styles: false,
+            module_controlnet: false,
+            module_sam: true,
+            module_upscale: false,
+        },
+    };
+    const expectedVisibility = {
+        top_lora: false,
+        top_clip: true,
+        styles: true,
+        module_controlnet: true,
+        module_sam: false,
+        module_upscale: true,
+    };
+    await saveBridgeSettingsForTest(baseUrl, seededSettings);
+
+    const consoleMessages = [];
+    const { context, page } = await newComfyPage(browser, baseUrl, consoleMessages, { width: 1600, height: 1300 });
+    try {
+        const exerciseSettingsUi = async () => await page.evaluate(async ({ graphData, expected }) => {
+            const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const waitFor = async (predicate, timeoutMs = 20000) => {
+                const started = performance.now();
+                while (performance.now() - started < timeoutMs) {
+                    const value = predicate();
+                    if (value) return value;
+                    await wait(100);
+                }
+                return null;
+            };
+            const visibilityState = (key) => {
+                const target = document.querySelector(`[data-visibility-key="${key}"]`);
+                return {
+                    exists: Boolean(target),
+                    text: (target?.textContent || "").trim().slice(0, 80),
+                    hiddenClass: Boolean(target?.classList?.contains("webui-bridge-ui-hidden")),
+                    display: target ? getComputedStyle(target).display : null,
+                    visibility: target ? getComputedStyle(target).visibility : null,
+                    height: Math.round(target?.getBoundingClientRect?.().height || 0),
+                };
+            };
+            const openSettings = async () => {
+                const settingsButton = [...document.querySelectorAll(".webui-bridge-top-controls button")]
+                    .find((button) => (button.textContent || "").trim() === "设置");
+                settingsButton?.click();
+                await waitFor(() => document.querySelector(".webui-bridge-settings-panel"));
+            };
+            const setVisibilityCheck = (labelText, checked) => {
+                const row = [...document.querySelectorAll(".webui-bridge-visibility-check")]
+                    .find((label) => (label.textContent || "").trim() === labelText);
+                const input = row?.querySelector("input");
+                if (!input) return false;
+                input.checked = checked;
+                input.dispatchEvent(new Event("input", { bubbles: true }));
+                input.dispatchEvent(new Event("change", { bubbles: true }));
+                return true;
+            };
+            const visibilityChecks = () => Object.fromEntries([...document.querySelectorAll(".webui-bridge-visibility-check")]
+                .map((label) => [(label.textContent || "").trim(), Boolean(label.querySelector("input")?.checked)]));
+
+            await window.app.loadGraphData(graphData, true, true, undefined, {
+                filename: "visibility-settings-persist.json",
+            });
+            window.app.canvas.ds.offset = [55, 35];
+            window.app.canvas.ds.scale = 1;
+            window.app.canvas.setDirty(true, true);
+            await wait(3200);
+            const beforeSave = {
+                top_lora: visibilityState("top_lora"),
+                top_clip: visibilityState("top_clip"),
+                styles: visibilityState("styles"),
+                module_controlnet: visibilityState("module_controlnet"),
+                module_sam: visibilityState("module_sam"),
+                module_upscale: visibilityState("module_upscale"),
+                modules: visibilityState(""),
+            };
+
+            await openSettings();
+            const foundChecks = {
+                "快速添加 LoRA": setVisibilityCheck("快速添加 LoRA", expected.top_lora),
+                "CLIP 强度": setVisibilityCheck("CLIP 强度", expected.top_clip),
+                "Styles 起手式": setVisibilityCheck("Styles 起手式", expected.styles),
+                ControlNet: setVisibilityCheck("ControlNet", expected.module_controlnet),
+                "SAM/Inpaint": setVisibilityCheck("SAM/Inpaint", expected.module_sam),
+                "放大修复": setVisibilityCheck("放大修复", expected.module_upscale),
+            };
+            const saveButton = [...document.querySelectorAll(".webui-bridge-settings-panel .webui-bridge-config-actions button")]
+                .find((button) => (button.textContent || "").trim() === "保存");
+            saveButton?.click();
+            await waitFor(() => !document.querySelector(".webui-bridge-settings-panel"), 30000);
+            await wait(1000);
+            const savedSettings = await fetch("/webui_prompt_bridge/settings", { cache: "no-store" }).then((response) => response.json()).then((data) => data.settings);
+            return {
+                beforeSave,
+                foundChecks,
+                savedVisibility: savedSettings?.ui_visibility || {},
+                afterSave: {
+                    top_lora: visibilityState("top_lora"),
+                    top_clip: visibilityState("top_clip"),
+                    styles: visibilityState("styles"),
+                    module_controlnet: visibilityState("module_controlnet"),
+                    module_sam: visibilityState("module_sam"),
+                    module_upscale: visibilityState("module_upscale"),
+                },
+            };
+        }, { graphData: workflow, expected: expectedVisibility });
+
+        const firstPass = await exerciseSettingsUi();
+        await screenshot(page, "compat-visibility-settings-after-save.png");
+        await page.reload({ waitUntil: "domcontentloaded", timeout: 60000 });
+        await page.waitForFunction(() => Boolean(window.app?.graph && window.app?.canvas && window.LiteGraph), null, {
+            timeout: 60000,
+        });
+        const afterReload = await page.evaluate(async (graphData) => {
+            const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const visibilityState = (key) => {
+                const target = document.querySelector(`[data-visibility-key="${key}"]`);
+                return {
+                    exists: Boolean(target),
+                    hiddenClass: Boolean(target?.classList?.contains("webui-bridge-ui-hidden")),
+                    display: target ? getComputedStyle(target).display : null,
+                    height: Math.round(target?.getBoundingClientRect?.().height || 0),
+                    text: (target?.textContent || "").trim().slice(0, 80),
+                };
+            };
+            await window.app.loadGraphData(graphData, true, true, undefined, {
+                filename: "visibility-settings-persist-reload.json",
+            });
+            window.app.canvas.ds.offset = [55, 35];
+            window.app.canvas.ds.scale = 1;
+            window.app.canvas.setDirty(true, true);
+            await wait(3600);
+            const settingsButton = [...document.querySelectorAll(".webui-bridge-top-controls button")]
+                .find((button) => (button.textContent || "").trim() === "设置");
+            settingsButton?.click();
+            await wait(600);
+            const checks = Object.fromEntries([...document.querySelectorAll(".webui-bridge-visibility-check")]
+                .map((label) => [(label.textContent || "").trim(), Boolean(label.querySelector("input")?.checked)]));
+            return {
+                dom: {
+                    top_lora: visibilityState("top_lora"),
+                    top_clip: visibilityState("top_clip"),
+                    styles: visibilityState("styles"),
+                    module_controlnet: visibilityState("module_controlnet"),
+                    module_sam: visibilityState("module_sam"),
+                    module_upscale: visibilityState("module_upscale"),
+                },
+                checks,
+            };
+        }, workflow);
+        await screenshot(page, "compat-visibility-settings-after-reload.png");
+
+        assert(firstPass.beforeSave.module_upscale.hiddenClass === true, "Seeded hidden module_upscale state was not applied before UI save", firstPass);
+        assert(Object.values(firstPass.foundChecks).every(Boolean), "Not all visibility checkboxes were found in settings", firstPass.foundChecks);
+        for (const [key, expected] of Object.entries(expectedVisibility)) {
+            assert(firstPass.savedVisibility[key] === expected, `Visibility setting ${key} was not saved by the settings UI`, firstPass.savedVisibility);
+        }
+        assert(firstPass.afterSave.module_upscale.hiddenClass === false && firstPass.afterSave.module_upscale.display !== "none", "module_upscale did not become visible immediately after saving", firstPass.afterSave);
+        assert(firstPass.afterSave.module_controlnet.hiddenClass === false && firstPass.afterSave.module_controlnet.display !== "none", "module_controlnet did not become visible immediately after saving", firstPass.afterSave);
+        assert(firstPass.afterSave.module_sam.hiddenClass === true && firstPass.afterSave.module_sam.display === "none", "module_sam did not hide immediately after saving", firstPass.afterSave);
+        assert(firstPass.afterSave.styles.hiddenClass === false && firstPass.afterSave.styles.display !== "none", "styles did not become visible immediately after saving", firstPass.afterSave);
+        assert(firstPass.afterSave.top_clip.hiddenClass === false && firstPass.afterSave.top_clip.display !== "none", "top_clip did not become visible immediately after saving", firstPass.afterSave);
+        assert(firstPass.afterSave.top_lora.hiddenClass === true && firstPass.afterSave.top_lora.display === "none", "top_lora did not hide immediately after saving", firstPass.afterSave);
+        assert(afterReload.dom.module_upscale.hiddenClass === false && afterReload.dom.module_upscale.display !== "none", "module_upscale visibility did not survive page reload", afterReload);
+        assert(afterReload.dom.module_controlnet.hiddenClass === false && afterReload.dom.module_controlnet.display !== "none", "module_controlnet visibility did not survive page reload", afterReload);
+        assert(afterReload.dom.module_sam.hiddenClass === true && afterReload.dom.module_sam.display === "none", "module_sam hidden state did not survive page reload", afterReload);
+        assert(afterReload.dom.styles.hiddenClass === false && afterReload.dom.styles.display !== "none", "styles visibility did not survive page reload", afterReload);
+        assert(afterReload.dom.top_clip.hiddenClass === false && afterReload.dom.top_clip.display !== "none", "top_clip visibility did not survive page reload", afterReload);
+        assert(afterReload.dom.top_lora.hiddenClass === true && afterReload.dom.top_lora.display === "none", "top_lora hidden state did not survive page reload", afterReload);
+        assert(afterReload.checks["放大修复"] === true && afterReload.checks.ControlNet === true && afterReload.checks["SAM/Inpaint"] === false, "Advanced module checkbox states did not survive page reload", afterReload.checks);
+        assert(afterReload.checks["Styles 起手式"] === true && afterReload.checks["CLIP 强度"] === true && afterReload.checks["快速添加 LoRA"] === false, "Sidebar checkbox states did not survive page reload", afterReload.checks);
+        const bridgeConsoleErrors = consoleMessages.filter((message) =>
+            ["error", "pageerror"].includes(message.type) &&
+            /WebUI Prompt Bridge|WebUIPromptBridge|webui_prompt_bridge/i.test(message.text)
+        );
+        assert(bridgeConsoleErrors.length === 0, "WebUIPromptBridge reported console errors during visibility persistence check", bridgeConsoleErrors);
+        return {
+            savedVisibility: Object.fromEntries(Object.keys(expectedVisibility).map((key) => [key, firstPass.savedVisibility[key]])),
+            reloadChecks: {
+                upscale: afterReload.checks["放大修复"],
+                controlnet: afterReload.checks.ControlNet,
+                sam: afterReload.checks["SAM/Inpaint"],
+                styles: afterReload.checks["Styles 起手式"],
+                clip: afterReload.checks["CLIP 强度"],
+                quickLora: afterReload.checks["快速添加 LoRA"],
+            },
+            bridgeConsoleErrors: bridgeConsoleErrors.length,
+        };
+    } finally {
+        await saveBridgeSettingsForTest(baseUrl, originalSettings).catch((error) => {
+            console.warn(`Failed to restore original bridge settings: ${error?.message || error}`);
+        });
+        await context.close();
+    }
+}
+
+async function verifyLoraDefaultPagingAndBasicLoad(browser, baseUrl, workflow) {
+    const consoleMessages = [];
+    const { context, page } = await newComfyPage(browser, baseUrl, consoleMessages, { width: 1600, height: 1300 });
+    const loraRequests = [];
+    const detailRequests = [];
+    const infoRequests = [];
+    try {
+        const mockLoras = Array.from({ length: 160 }, (_, index) => {
+            const name = `mock-folder/mock-lora-${String(index + 1).padStart(3, "0")}.safetensors`;
+            const alias = name.replace(/\.[^.]+$/, "");
+            return {
+                name,
+                alias,
+                folder: "mock-folder",
+                file_name: name.split("/").pop(),
+                base_name: alias.split("/").pop(),
+                aliases: [],
+                metadata_title: "",
+                metadata_output_name: "",
+                thumbnail: "",
+                thumbnail_unknown: true,
+                description: "",
+                user_metadata: {},
+                manual_category: "",
+                category: "",
+                activation_text: "",
+                negative_text: "",
+                preferred_weight: 0,
+                sd_version: "",
+                notes: "",
+                training_tags: [],
+                search_terms: name,
+                created: 0,
+                modified: 0,
+                prompt: `<lora:${alias}:1>`,
+            };
+        });
+        await page.route("**/webui_prompt_bridge/loras*", async (route) => {
+            loraRequests.push(route.request().url());
+            await route.fulfill({
+                status: 200,
+                contentType: "application/json",
+                body: JSON.stringify({ loras: mockLoras }),
+            });
+        });
+        await page.route("**/webui_prompt_bridge/lora_user_metadata*", async (route) => {
+            const url = new URL(route.request().url());
+            detailRequests.push(url.href);
+            const name = url.searchParams.get("name") || "mock-folder/mock-lora-001.safetensors";
+            await route.fulfill({
+                status: 200,
+                contentType: "application/json",
+                body: JSON.stringify({
+                    requested: name,
+                    name,
+                    found: true,
+                    thumbnail: "",
+                    description: "",
+                    user_metadata: {
+                        description: "",
+                        category: "",
+                        "sd version": "Unknown",
+                        "activation text": "lazy_detail_token",
+                        "preferred weight": 0.85,
+                        "negative text": "",
+                        notes: "",
+                    },
+                    metadata_table: [],
+                    training_tags: [],
+                    summary: {},
+                }),
+            });
+        });
+        await page.route("**/webui_prompt_bridge/lora_info*", async (route) => {
+            infoRequests.push(route.request().url());
+            await route.fulfill({
+                status: 200,
+                contentType: "application/json",
+                body: JSON.stringify({ trigger_words: [] }),
+            });
+        });
+        const report = await page.evaluate(async (graphData) => {
+            localStorage.setItem("webui-bridge-lora-page-size", "0");
+            localStorage.removeItem("webui-bridge-lora-page-size-user-set");
+            await window.app.loadGraphData(graphData, true, true, undefined, {
+                filename: "lora-default-paging-basic-load.json",
+            });
+            window.app.canvas.ds.offset = [55, 35];
+            window.app.canvas.ds.scale = 1;
+            window.app.canvas.setDirty(true, true);
+            await new Promise((resolve) => setTimeout(resolve, 2600));
+            const beforeClick = {
+                cardCount: document.querySelectorAll(".webui-bridge-card").length,
+                pageSizeValue: document.querySelector(".webui-bridge-page-size")?.value || "",
+                pageInfo: document.querySelector(".webui-bridge-page-info")?.textContent || "",
+                countText: document.querySelector(".webui-bridge-network-count:last-child")?.textContent || "",
+            };
+            document.querySelector(".webui-bridge-card")?.click();
+            await new Promise((resolve) => setTimeout(resolve, 900));
+            const prompt = document.querySelector(".webui-bridge-positive-prompt-row textarea")?.value || "";
+            const pageSize = document.querySelector(".webui-bridge-page-size");
+            if (pageSize) {
+                pageSize.value = "0";
+                pageSize.dispatchEvent(new Event("change", { bubbles: true }));
+            }
+            const manualAllAfterChange = localStorage.getItem("webui-bridge-lora-page-size");
+            const manualAllFlag = localStorage.getItem("webui-bridge-lora-page-size-user-set");
+            return {
+                ...beforeClick,
+                prompt,
+                manualAllAfterChange,
+                manualAllFlag,
+            };
+        }, workflow);
+        await screenshot(page, "compat-lora-default-paging-basic-load.png");
+        assert(loraRequests.length > 0, "LoRA list was not requested during paging check", { loraRequests });
+        assert(loraRequests.every((url) => /[?&]detail=basic\b/.test(url)), "Initial LoRA load did not use detail=basic", { loraRequests });
+        assert(report.pageSizeValue === "32", "Default LoRA page size was not 32", report);
+        assert(report.cardCount > 0 && report.cardCount <= 32, "LoRA cards rendered more than one default page", report);
+        assert(/^1\/5$/.test(report.pageInfo), "LoRA pagination did not reflect mocked item count", report);
+        assert(detailRequests.length === 1 && detailRequests.every((url) => /[?&]detail=basic\b/.test(url)), "LoRA click did not lazy-load lightweight metadata", { detailRequests });
+        const clickedInfoRequests = infoRequests.filter((url) => /mock-folder%2Fmock-lora-001|mock-folder\/mock-lora-001/.test(url));
+        assert(clickedInfoRequests.length <= 1, "LoRA click requested trigger metadata more than once", { infoRequests });
+        assert(/lazy_detail_token/.test(report.prompt) && /<lora:mock-folder\/mock-lora-001:0\.85>/.test(report.prompt), "LoRA click did not insert prompt from lazy basic detail", report);
+        assert(report.manualAllAfterChange === "0" && report.manualAllFlag === "1", "Manual LoRA page-size selection was not persisted", report);
+        const bridgeConsoleErrors = consoleMessages.filter((message) =>
+            ["error", "pageerror"].includes(message.type) &&
+            /WebUI Prompt Bridge|WebUIPromptBridge|webui_prompt_bridge/i.test(message.text)
+        );
+        assert(bridgeConsoleErrors.length === 0, "WebUIPromptBridge reported console errors during LoRA paging check", bridgeConsoleErrors);
+        return {
+            requests: loraRequests.length,
+            detailRequests: detailRequests.length,
+            infoRequests: clickedInfoRequests.length,
+            cardCount: report.cardCount,
+            pageInfo: report.pageInfo,
+            bridgeConsoleErrors: bridgeConsoleErrors.length,
+        };
+    } finally {
+        await context.close();
+    }
+}
+
 async function verifyLoraBrowserFlow(browser, baseUrl, workflow) {
     const consoleMessages = [];
     const { context, page } = await newComfyPage(browser, baseUrl, consoleMessages, { width: 1600, height: 1300 });
@@ -1111,6 +1911,13 @@ async function main() {
             bridgeUiErgonomics: await verifyBridgeUiErgonomics(browser, options.baseUrl, workflow),
             sectionResizeBlankRecovery: await verifySectionResizeBlankRecovery(browser, options.baseUrl, workflow),
             restoreSizeStability: await verifyRestoreSizeStability(browser, options.baseUrl, workflow),
+            flatSavedBridgeSizeRepair: await verifyFlatSavedBridgeSizeRepair(browser, options.baseUrl, workflow),
+            oversizedSavedBridgeSizeRepairAndPortGutters: await verifyOversizedSavedBridgeSizeRepairAndPortGutters(browser, options.baseUrl, workflow),
+            sidebarCollapsePersistenceAndSlotLabelCleanup: await verifySidebarCollapsePersistenceAndSlotLabelCleanup(browser, options.baseUrl, workflow),
+            positiveTextareaManualHeightPersists: await verifyPositiveTextareaManualHeightPersists(browser, options.baseUrl, workflow),
+            quickLoraDefaultVisibility: await verifyQuickLoraDefaultVisibility(browser, options.baseUrl, workflow),
+            visibilitySettingsPersistAcrossReload: await verifyVisibilitySettingsPersistAcrossReload(browser, options.baseUrl, workflow),
+            loraDefaultPagingAndBasicLoad: await verifyLoraDefaultPagingAndBasicLoad(browser, options.baseUrl, workflow),
             loraBrowserFlow: await verifyLoraBrowserFlow(browser, options.baseUrl, workflow),
             bridgeSettingsRoundTrip: await verifyBridgeSettingsRoundTrip(browser, options.baseUrl, workflow),
             bridgeLayoutPreferencePersistence: await verifyBridgeLayoutPreferencePersistence(browser, options.baseUrl, workflow),

@@ -72,7 +72,7 @@ DEFAULT_BRIDGE_SETTINGS = {
 UI_VISIBILITY_DEFAULTS = {
     "top_tutorial": False,
     "top_webui": True,
-    "top_lora": False,
+    "top_lora": True,
     "top_clip": False,
     "top_fail_on_missing": False,
     "model_switch": True,
@@ -2584,6 +2584,36 @@ def _lora_detail(lora_name):
         ],
         "training_tags": _lora_training_tags(raw_metadata),
         "summary": summary,
+    }
+
+
+def _lora_basic_detail(lora_name):
+    resolved = _resolve_lora_name(lora_name)
+    if resolved is None:
+        return {"requested": lora_name, "found": False}
+    lora_path = folder_paths.get_full_path("loras", resolved)
+    preview_path = _find_lora_preview_path(lora_path)
+    description = _find_lora_description(lora_path)
+    user_metadata = _read_lora_user_metadata(lora_path, description)
+    sd_version = user_metadata.get("sd version") or "Unknown"
+    return {
+        "requested": lora_name,
+        "name": resolved,
+        "found": True,
+        "thumbnail": f"/webui_prompt_bridge/lora_thumbnail?name={quote(resolved, safe='')}" if preview_path else "",
+        "description": user_metadata.get("description") or description,
+        "user_metadata": {
+            "description": user_metadata.get("description") or description,
+            "category": user_metadata.get("category", "") or user_metadata.get("manual category", ""),
+            "sd version": sd_version,
+            "activation text": user_metadata.get("activation text", ""),
+            "preferred weight": user_metadata.get("preferred weight", 0.0),
+            "negative text": user_metadata.get("negative text", ""),
+            "notes": user_metadata.get("notes", ""),
+        },
+        "metadata_table": [],
+        "training_tags": [],
+        "summary": {},
     }
 
 
@@ -5654,7 +5684,11 @@ def _register_routes():
         name = request.query.get("name", "")
         if not name:
             return web.json_response({"error": "LoRA name is required"}, status=400)
-        detail = _lora_detail(name)
+        detail_mode = str(request.query.get("detail", "full") or "full").casefold()
+        if detail_mode in {"basic", "lite", "light"}:
+            detail = _lora_basic_detail(name)
+        else:
+            detail = _lora_detail(name)
         if not detail.get("found"):
             return web.json_response(detail, status=404)
         return web.json_response(detail)
