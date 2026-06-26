@@ -176,7 +176,6 @@ const BRIDGE_LAYOUT_STATE_PROPERTY = "webui_prompt_bridge_layout";
 const BRIDGE_LAYOUT_STATE_VERSION = 1;
 const PANEL_UNUSABLE_MIN_WIDTH = PANEL_MIN_WIDTH;
 const PANEL_UNUSABLE_MIN_HEIGHT = 520;
-const PANEL_UNUSABLE_MAX_SAVED_HEIGHT = 1600;
 const LORA_PAGE_SIZE_KEY = "webui-bridge-lora-page-size";
 const LORA_PAGE_SIZE_USER_KEY = "webui-bridge-lora-page-size-user-set";
 const DEFAULT_LORA_PAGE_SIZE = 32;
@@ -1202,8 +1201,7 @@ function looksLikeUnusableBridgePanelSize(size) {
     if (!values) return true;
     const [width, height] = values;
     return width < PANEL_UNUSABLE_MIN_WIDTH ||
-        height < PANEL_UNUSABLE_MIN_HEIGHT ||
-        height > PANEL_UNUSABLE_MAX_SAVED_HEIGHT;
+        height < PANEL_UNUSABLE_MIN_HEIGHT;
 }
 
 function shouldRepairBridgePanelSize(size) {
@@ -2123,7 +2121,9 @@ function repairBridgePanelLayoutAfterWorkflow(node, reason = "workflow") {
         }
         node.__webuiBridgeApplyDomWidgetSize?.(desired[0], desired[1]);
         panel?.__webuiBridgeScheduleAdaptiveLayout?.();
+        panel?.__webuiBridgeSettleManualResizeLayout?.();
         window.requestAnimationFrame?.(() => panel?.__webuiBridgeScheduleAdaptiveLayout?.());
+        window.requestAnimationFrame?.(() => panel?.__webuiBridgeSettleManualResizeLayout?.());
     };
     run();
     for (const delay of WORKFLOW_LAYOUT_REPAIR_DELAYS) {
@@ -9889,7 +9889,7 @@ function buildPanel(node) {
                     resetResizeTargetHeight(extraSection, extraHeightKey, "1 1 auto");
                     extraSection.style.flex = "1 1 auto";
                 } else if (lora !== undefined && !extraCollapsed) {
-                    setResizeTargetHeight(extraSection, extraHeightKey, lora, { min: EXTRA_NETWORKS_MIN_HEIGHT, max: extraSection.__webuiBridgeMaxHeight });
+                    setResizeTargetHeight(extraSection, extraHeightKey, lora, { min: EXTRA_NETWORKS_MIN_HEIGHT, max: getExtraResizeMaxHeight() });
                     extraSection.style.flex = "0 0 auto";
                 }
                 if (positiveText === null) {
@@ -11051,6 +11051,7 @@ function buildPanel(node) {
             : applyCheckpointModel(modelSelect.value, state.models);
         renderModelSwitch();
         setStatus(result.message);
+        scheduleManualResizeSettle();
     };
 
     const updateCounters = () => {
@@ -11579,6 +11580,7 @@ function buildPanel(node) {
         });
         sync();
         renderPromptPanels();
+        scheduleManualResizeSettle();
         setStatus(changed.length
             ? "已切换极速模式: 仅加入加速 LoRA + 16 steps / CFG 1.5"
             : "已加入加速 LoRA；没找到 KSampler，采样参数未改");
@@ -11596,6 +11598,7 @@ function buildPanel(node) {
         });
         sync();
         renderPromptPanels();
+        scheduleManualResizeSettle();
         setStatus(changed.length
             ? "已切换纯模型质量模式: 仅移除加速 LoRA + 34 steps / CFG 3.5"
             : "已移除加速 LoRA；没找到 KSampler，采样参数未改");
@@ -11965,6 +11968,7 @@ function buildPanel(node) {
                     const result = applySplitModelMode();
                     renderModelSwitch();
                     setStatus(result.message);
+                    scheduleManualResizeSettle();
                 },
             }, "分体模型"),
             modelCount,
@@ -12162,7 +12166,7 @@ function buildPanel(node) {
                     if (!extraCollapsed && !loraOverlayOpen) {
                         setResizeTargetHeight(extraSection, extraHeightKey, negativeMainStartExtraHeight - delta, {
                             min: EXTRA_NETWORKS_MIN_HEIGHT,
-                            max: extraSection.__webuiBridgeMaxHeight || EXTRA_NETWORKS_MAX_HEIGHT,
+                            max: getExtraResizeMaxHeight(),
                         });
                         extraSection.style.flex = "0 0 auto";
                     }
@@ -12265,12 +12269,15 @@ function buildPanel(node) {
         networkTree,
         networkPane,
     ]);
+    let panelLayoutIsMeasurable = () => true;
+    let lastVisibleBridgeLayoutState = null;
     const ensureUsableExtraHeight = (preferredHeight = EXTRA_NETWORKS_USABLE_MIN_HEIGHT) => {
         if (extraCollapsed || loraOverlayOpen) return;
         if (promptLoraSplitManual) return;
         if (!extraSection?.isConnected || resizeTargetHidden(extraSection)) return;
+        if (!panelLayoutIsMeasurable()) return;
         const height = extraSection?.getBoundingClientRect?.().height || 0;
-        const maxExtraHeight = extraSection.__webuiBridgeMaxHeight || EXTRA_NETWORKS_MAX_HEIGHT;
+        const maxExtraHeight = getExtraResizeMaxHeight();
         const targetHeight = clampNumber(
             Math.max(getExtraVisibleFloor?.() || EXTRA_NETWORKS_MIN_HEIGHT, preferredHeight),
             getExtraVisibleFloor?.() || EXTRA_NETWORKS_MIN_HEIGHT,
@@ -12352,7 +12359,7 @@ function buildPanel(node) {
         const currentHeight = resizeTargetLayoutHeight(extraSection) || EXTRA_NETWORKS_MIN_HEIGHT;
         setResizeTargetHeight(extraSection, extraHeightKey, currentHeight + deltaHeight, {
             min: EXTRA_NETWORKS_MIN_HEIGHT,
-            max: extraSection.__webuiBridgeMaxHeight || EXTRA_NETWORKS_MAX_HEIGHT,
+            max: getExtraResizeMaxHeight(),
         });
         extraSection.style.flex = "0 0 auto";
     };
@@ -12372,9 +12379,23 @@ function buildPanel(node) {
                 if (Math.abs(blank) <= settleTolerance) return;
                 const currentHeight = resizeTargetLayoutHeight(extraSection) || EXTRA_NETWORKS_MIN_HEIGHT;
                 let nextExtraHeight = currentHeight + blank / scale;
+                const extraMin = EXTRA_NETWORKS_MIN_HEIGHT;
+                const extraMax = getExtraResizeMaxHeight();
+                const currentTopHeight = topRow?.isConnected ? (resizeTargetLayoutHeight(topRow) || 0) : 0;
+                const topComfortHeight = topRow?.isConnected ? getTopRowComfortHeight() : 0;
+                const topOvershoot = currentTopHeight && topComfortHeight
+                    ? currentTopHeight - topComfortHeight
+                    : 0;
+                if (topOvershoot > Math.max(48, settleTolerance / scale) && blank >= -settleTolerance) {
+                    setResizeTargetHeight(topRow, topRowHeightKey, currentTopHeight - topOvershoot, {
+                        min: getTopRowVisibleMinHeight(),
+                        max: topRow.__webuiBridgeMaxHeight,
+                    });
+                    extraSection.style.flex = "0 0 auto";
+                    return;
+                }
                 if (blank < 0 && topRow?.isConnected) {
                     const extraComfortHeight = getExtraResizeComfortHeight();
-                    const currentTopHeight = resizeTargetLayoutHeight(topRow) || 0;
                     const topMin = getTopRowVisibleMinHeight();
                     if (nextExtraHeight < extraComfortHeight && currentTopHeight > topMin + 1) {
                         const topReduction = Math.min(currentTopHeight - topMin, extraComfortHeight - nextExtraHeight);
@@ -12384,10 +12405,26 @@ function buildPanel(node) {
                         });
                         nextExtraHeight += topReduction;
                     }
+                } else if (blank > 0 && topRow?.isConnected) {
+                    const cappedExtraHeight = clampNumber(nextExtraHeight, extraMin, extraMax);
+                    const remainingBlank = Math.max(0, blank / scale - (cappedExtraHeight - currentHeight));
+                    if (remainingBlank > 1) {
+                        const topMax = Math.min(
+                            topRow.__webuiBridgeMaxHeight || PANEL_MAX_HEIGHT,
+                            topComfortHeight || currentTopHeight,
+                        );
+                        const topIncrease = Math.min(Math.max(0, topMax - currentTopHeight), remainingBlank);
+                        if (topIncrease > 1) {
+                            setResizeTargetHeight(topRow, topRowHeightKey, currentTopHeight + topIncrease, {
+                                min: getTopRowVisibleMinHeight(),
+                                max: topMax,
+                            });
+                        }
+                    }
                 }
                 setResizeTargetHeight(extraSection, extraHeightKey, nextExtraHeight, {
-                    min: EXTRA_NETWORKS_MIN_HEIGHT,
-                    max: extraSection.__webuiBridgeMaxHeight || EXTRA_NETWORKS_MAX_HEIGHT,
+                    min: extraMin,
+                    max: extraMax,
                 });
                 extraSection.style.flex = "0 0 auto";
             });
@@ -12415,10 +12452,10 @@ function buildPanel(node) {
         if (preserveExpandedHeight && preservedHeight) {
             setResizeTargetHeight(extraSection, extraHeightKey, preservedHeight, {
                 min: EXTRA_NETWORKS_MIN_HEIGHT,
-                max: extraSection.__webuiBridgeMaxHeight,
+                max: getExtraResizeMaxHeight(),
             });
         } else {
-            applyStoredHeight(extraSection, extraHeightKey, { min: EXTRA_NETWORKS_MIN_HEIGHT, max: extraSection.__webuiBridgeMaxHeight });
+            applyStoredHeight(extraSection, extraHeightKey, { min: EXTRA_NETWORKS_MIN_HEIGHT, max: getExtraResizeMaxHeight() });
         }
         extraSection.style.flex = "0 0 auto";
         requestAnimationFrame(ensureUsableExtraHeight);
@@ -12482,7 +12519,7 @@ function buildPanel(node) {
         if (currentExtraHeight && !extraCollapsed && !loraOverlayOpen) {
             setResizeTargetHeight(extraSection, extraHeightKey, currentExtraHeight, {
                 min: getExtraVisibleFloor(),
-                max: extraSection.__webuiBridgeMaxHeight || EXTRA_NETWORKS_MAX_HEIGHT,
+                max: getExtraResizeMaxHeight(),
             });
             extraSection.style.flex = "0 0 auto";
         }
@@ -12640,6 +12677,12 @@ function buildPanel(node) {
         return Math.ceil(positiveInputMin + positiveTagsMin + COLLAPSED_NEGATIVE_SPLIT_GRIP_HEIGHT + collapsedNegativeHeight + gap * 3);
     };
     const getExtraVisibleFloor = () => extraCollapsed ? 42 : EXTRA_NETWORKS_MIN_HEIGHT;
+    function getExtraResizeMaxHeight() {
+        const inlineMax = extraSection?.__webuiBridgeMaxHeight || EXTRA_NETWORKS_INLINE_MAX_HEIGHT;
+        return negative.row?.classList?.contains("collapsed")
+            ? Math.max(inlineMax, EXTRA_NETWORKS_MAX_HEIGHT)
+            : inlineMax;
+    }
     const getExtraResizeComfortHeight = () => extraCollapsed
         ? 42
         : Math.max(getExtraVisibleFloor(), EXTRA_NETWORKS_CARD_ROW_MIN_HEIGHT + 96);
@@ -12658,7 +12701,7 @@ function buildPanel(node) {
         });
         setResizeTargetHeight(extraSection, extraHeightKey, Math.max(452, getExtraResizeComfortHeight()), {
             min: getExtraVisibleFloor(),
-            max: extraSection.__webuiBridgeMaxHeight || EXTRA_NETWORKS_MAX_HEIGHT,
+            max: getExtraResizeMaxHeight(),
         });
         extraSection.style.flex = "0 0 auto";
     };
@@ -12674,6 +12717,25 @@ function buildPanel(node) {
         const visibleMax = panelHeight - paddingY - getPanelTopControlsHeight() - rowGap * 3 - getPanelSplitterHeight() - getExtraVisibleFloor() - 4;
         return Math.max(topMin, Math.min(topRow.__webuiBridgeMaxHeight, Math.floor(visibleMax)));
     };
+    function visibleStackContentHeight(container) {
+        if (!container?.isConnected || resizeTargetHidden(container)) return 0;
+        const children = [...container.children].filter((child) => !resizeTargetHidden(child));
+        if (!children.length) return 0;
+        const style = getComputedStyle(container);
+        const gap = Number.parseFloat(style.rowGap || style.gap) || 0;
+        const height = children.reduce((total, child) => total + resizeTargetLayoutHeight(child), 0) +
+            gap * Math.max(0, children.length - 1);
+        return Math.ceil(height);
+    }
+    function getTopRowComfortHeight() {
+        const topMin = getTopRowVisibleMinHeight();
+        const topMax = getTopRowVisibleMaxHeight();
+        const promptContentHeight = visibleStackContentHeight(promptsColumn);
+        const actionContentHeight = actionCollapsed ? 0 : visibleStackContentHeight(actionColumn);
+        const sideGripHeight = actionCollapsed ? 0 : resizeTargetLayoutHeight(actionResizeGrip);
+        const contentHeight = Math.max(promptContentHeight, actionContentHeight, sideGripHeight, topMin);
+        return clampNumber(contentHeight, topMin, topMax);
+    }
     resizePanelSectionsWithNode = (deltaHeight, startSections = capturePanelSectionHeights()) => {
         if (!deltaHeight || extraCollapsed || loraOverlayOpen || !topRow?.isConnected || !extraSection?.isConnected) {
             resizeExtraWithNode(deltaHeight);
@@ -12684,7 +12746,7 @@ function buildPanel(node) {
         const topMin = getTopRowVisibleMinHeight();
         const topMax = topRow.__webuiBridgeMaxHeight || PANEL_MAX_HEIGHT;
         const extraMin = getExtraVisibleFloor();
-        const extraMax = extraSection.__webuiBridgeMaxHeight || EXTRA_NETWORKS_MAX_HEIGHT;
+        const extraMax = getExtraResizeMaxHeight();
         const startTop = clampNumber(startSections?.top || resizeTargetLayoutHeight(topRow) || topMin, topMin, topMax);
         const startExtra = clampNumber(startSections?.extra || resizeTargetLayoutHeight(extraSection) || extraMin, extraMin, extraMax);
         const startTotal = Math.max(topMin + extraMin, startTop + startExtra);
@@ -12725,7 +12787,7 @@ function buildPanel(node) {
             beforeMin: getTopRowVisibleMinHeight,
             beforeMax: getTopRowVisibleMaxHeight,
             afterMin: getExtraVisibleFloor,
-            afterMax: () => extraSection.__webuiBridgeMaxHeight || EXTRA_NETWORKS_INLINE_MAX_HEIGHT,
+            afterMax: getExtraResizeMaxHeight,
             afterFlex: "0 0 auto",
             label: "提示词 / LoRA",
             title: "上下拖动分配提示词区域和 Extra Networks 高度，双击恢复",
@@ -12743,16 +12805,32 @@ function buildPanel(node) {
         extraSection,
         resizeGrip,
     ]);
+    panelLayoutIsMeasurable = () => {
+        if (!panel?.isConnected) return false;
+        const rect = panel.getBoundingClientRect?.();
+        return Boolean(
+            rect &&
+            rect.width > 8 &&
+            rect.height > 8 &&
+            panel.offsetWidth > 8 &&
+            panel.offsetHeight > 8
+        );
+    };
     const layoutHeightForState = (target, storageKey = "") => {
         const height = resizeTargetLayoutHeight(target) || Math.round(target?.getBoundingClientRect?.().height || 0);
         if (height) return height;
         return storageKey ? readLocalNumber(storageKey, null) : null;
     };
     const collectBridgeLayoutState = () => {
+        if (!panelLayoutIsMeasurable()) {
+            return lastVisibleBridgeLayoutState
+                ? { ...lastVisibleBridgeLayoutState }
+                : normalizeBridgeLayoutState(node.__webuiBridgeConfiguredLayoutState);
+        }
         const sidebarWidth = topRow
             ? Number.parseFloat(getComputedStyle(topRow).getPropertyValue("--webui-bridge-sidebar-width"))
             : null;
-        return normalizeBridgeLayoutState({
+        const layoutState = normalizeBridgeLayoutState({
             top_row_height: layoutHeightForState(topRow, topRowHeightKey),
             extra_height: extraCollapsed
                 ? (readLocalNumber(extraHeightKey, null) || layoutHeightForState(extraSection, extraHeightKey))
@@ -12769,6 +12847,8 @@ function buildPanel(node) {
             negative_tag_height: layoutHeightForState(negativeTagPanel, negativeTagHeightKey),
             lora_scroll_top: cards?.isConnected ? Math.max(0, Math.round(cards.scrollTop || 0)) : readLocalNumber(loraScrollTopKey, null),
         });
+        if (layoutState) lastVisibleBridgeLayoutState = { ...layoutState };
+        return layoutState;
     };
     panel.__webuiBridgeGetLayoutState = collectBridgeLayoutState;
     panel.__webuiBridgeMarkPromptInnerManualResize = markPromptInnerManualResize;
@@ -12895,7 +12975,7 @@ function buildPanel(node) {
         if (!force && Math.abs(nextExtraHeight - currentHeight) < 2) return;
         setResizeTargetHeight(extraSection, extraHeightKey, nextExtraHeight, {
             min: EXTRA_NETWORKS_CARD_ROW_MIN_HEIGHT,
-            max: extraSection.__webuiBridgeMaxHeight,
+            max: getExtraResizeMaxHeight(),
             persist: false,
         });
         extraSection.style.flex = "0 0 auto";
@@ -12952,7 +13032,7 @@ function buildPanel(node) {
         if (currentExtra < extraFloor - 1) {
             setResizeTargetHeight(extraSection, extraHeightKey, extraFloor, {
                 min: extraFloor,
-                max: extraSection.__webuiBridgeMaxHeight || EXTRA_NETWORKS_MAX_HEIGHT,
+                max: getExtraResizeMaxHeight(),
                 persist: false,
             });
             extraSection.style.flex = "0 0 auto";
@@ -13052,6 +13132,7 @@ function buildPanel(node) {
         window.requestAnimationFrame?.(() => {
             window.requestAnimationFrame?.(() => {
                 adaptiveLayoutScheduled = false;
+                if (!panelLayoutIsMeasurable()) return;
                 ensurePanelSplitterVisible();
                 fitPromptColumnToContent();
                 ensurePanelSplitterVisible();

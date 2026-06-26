@@ -195,6 +195,9 @@ These fixes exist in the current local worktree and should be preserved unless i
 - `onDrawForeground` self-heals missing slot label overlays when the panel is usable.
 - Positive textarea native/manual height is persisted through `webui-bridge-textarea-height-prompt` and must not be overwritten by adaptive layout.
 - `fitPromptColumnToContent()` should only gently auto-fit when no manual height exists.
+- Adaptive layout must skip while the DOM widget is offscreen/unmeasurable; keep the last visible layout state instead of sampling 0px hidden geometry.
+- Large saved layouts must settle after load and model/mode switches: prompt/top row height should shrink or grow only to its visible content comfort height, while the capped LoRA section must not expand into half-node space.
+- When the negative prompt is collapsed from a full layout, the LoRA section may temporarily exceed the normal 520px inline cap to reclaim the released vertical space and avoid a large empty bottom area.
 - `快速添加 LoRA` replaces the old top LoRA button label and defaults to visible.
 - LoRA list defaults to paging: `DEFAULT_LORA_PAGE_SIZE = 32`.
 - First LoRA list load should be basic-detail only. Lazy detail calls are made when selecting/editing/using a LoRA.
@@ -229,9 +232,12 @@ The main regression suite currently covers:
 - Workflow switch nodes still work.
 - Current and custom workflow layouts are preserved.
 - Prompt/LoRA ergonomics and section resizing.
+- Full-layout negative prompt collapse reclaims released space into LoRA instead of leaving a large blank below.
 - Restore size stability.
+- Offscreen canvas pan/return does not collapse prompt or LoRA layout.
+- Large saved layouts settle after load and after mode/model switches without changing node size.
 - Flat saved size repair.
-- Oversized saved size and port gutter repair.
+- Large saved node sizes are preserved while port gutters stay outside the DOM panel.
 - Sidebar collapse persistence and orphan external port label cleanup.
 - Positive textarea manual height persistence.
 - Quick LoRA button default visibility.
@@ -258,7 +264,7 @@ If the UI is squeezed or ports are covered:
 
 1. Inspect `bridge.size`, `.webui-bridge-panel` dimensions, and `.webui-bridge-slot-label-overlay`.
 2. Check `shouldRepairBridgePanelSize()`, `normalizeBridgePanelSize()`, and `installBridgePanel()`.
-3. Run `verifyFlatSavedBridgeSizeRepair` and `verifyOversizedSavedBridgeSizeRepairAndPortGutters` through the full suite.
+3. Run `verifyFlatSavedBridgeSizeRepair` and `verifyLargeSavedBridgeSizePreservedAndPortGutters` through the full suite.
 
 If textareas bounce back after dragging:
 

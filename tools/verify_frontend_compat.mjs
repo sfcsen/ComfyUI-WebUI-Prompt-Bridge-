@@ -203,6 +203,9 @@ async function bridgeBottomBlankMetrics(page, label = "metrics") {
         const topRow = document.querySelector(".webui-bridge-toprow");
         const extra = document.querySelector(".webui-bridge-extra");
         const splitter = document.querySelector(".webui-bridge-panel-splitter");
+        const negativeRow = [...document.querySelectorAll(".webui-bridge-prompt-row")]
+            .find((row) => !row.classList.contains("webui-bridge-positive-prompt-row"));
+        const bridge = window.app.graph._nodes.find((node) => node.type === "WebUIPromptBridge");
         const rect = (element) => {
             if (!element) return null;
             const item = element.getBoundingClientRect();
@@ -219,7 +222,10 @@ async function bridgeBottomBlankMetrics(page, label = "metrics") {
             topRow: rect(topRow),
             splitter: rect(splitter),
             extra: rect(extra),
-            nodeSize: Array.from(window.app.graph._nodes.find((node) => node.type === "WebUIPromptBridge")?.size || []),
+            negativeCollapsed: Boolean(negativeRow?.classList.contains("collapsed")),
+            layoutState: bridge?.__webuiBridgePanel?.__webuiBridgeGetLayoutState?.() || null,
+            extraMaxHeight: extra?.__webuiBridgeMaxHeight || null,
+            nodeSize: Array.from(bridge?.size || []),
         };
     }, label);
 }
@@ -244,6 +250,16 @@ async function bridgeLayoutStabilitySnapshot(page, label = "metrics") {
                 bottom: Math.round(item.bottom),
             };
         };
+        const promptContentBlank = () => {
+            const prompts = document.querySelector(".webui-bridge-prompts");
+            if (!prompts) return null;
+            const promptsRect = prompts.getBoundingClientRect();
+            const childBottoms = [...prompts.children]
+                .filter((child) => child.getClientRects?.().length && getComputedStyle(child).display !== "none")
+                .map((child) => child.getBoundingClientRect().bottom);
+            if (!childBottoms.length) return null;
+            return Math.round(promptsRect.bottom - Math.max(...childBottoms));
+        };
         const style = topRow ? getComputedStyle(topRow) : null;
         return {
             label: metricLabel,
@@ -260,6 +276,8 @@ async function bridgeLayoutStabilitySnapshot(page, label = "metrics") {
             localTopHeight: localStorage.getItem("webui-bridge-toprow-height"),
             localExtraHeight: localStorage.getItem("webui-bridge-extra-height"),
             localActionWidth: localStorage.getItem("webui-bridge-action-column-width"),
+            layoutState: bridge?.__webuiBridgePanel?.__webuiBridgeGetLayoutState?.() || null,
+            promptContentBlank: promptContentBlank(),
             regional: {
                 inputValues: regionalInputs.slice(0, 2).map((input) => input.value),
                 widgetWidth: widgetValue("regional_canvas_width"),
@@ -764,6 +782,81 @@ async function verifyBridgeUiErgonomics(browser, baseUrl, workflow) {
     }
 }
 
+async function verifyFullNegativeCollapseReclaimsLoraSpace(browser, baseUrl, workflow) {
+    const consoleMessages = [];
+    const { context, page } = await newComfyPage(browser, baseUrl, consoleMessages, { width: 1900, height: 1500 });
+    try {
+        const fullWorkflow = JSON.parse(JSON.stringify(workflow));
+        for (const node of fullWorkflow.nodes || []) {
+            if (node.type !== "WebUIPromptBridge") continue;
+            node.size = [1600, 1650];
+            node.properties = {
+                ...(node.properties || {}),
+                webui_prompt_bridge_layout: {
+                    version: 1,
+                    top_row_height: 980,
+                    extra_height: 520,
+                    sidebar_width: 400,
+                    positive_textarea_height: 112,
+                    negative_textarea_height: 96,
+                    positive_chip_height: 132,
+                    negative_chip_height: 104,
+                    positive_tag_height: 260,
+                    negative_tag_height: 260,
+                    lora_scroll_top: 0,
+                    extra_collapsed: false,
+                    sidebar_collapsed: false,
+                    negative_collapsed: false,
+                },
+            };
+            break;
+        }
+        await page.evaluate(async (graphData) => {
+            localStorage.removeItem("webui-bridge-negative-collapsed");
+            await window.app.loadGraphData(graphData, true, true, undefined, {
+                filename: "full-negative-collapse-reclaims-lora-space.json",
+            });
+            window.app.canvas.ds.offset = [120, 80];
+            window.app.canvas.ds.scale = 0.78;
+            window.app.canvas.setDirty(true, true);
+        }, fullWorkflow);
+        await page.waitForTimeout(4200);
+        const before = await bridgeBottomBlankMetrics(page, "full layout before negative collapse");
+        assert(before.blankBelowExtra !== null && before.blankBelowExtra <= 48,
+            "Seeded full Bridge layout did not start near the panel bottom", before);
+        await page.evaluate(() => {
+            const collapseButton = [...document.querySelectorAll(".webui-bridge-collapse-btn")]
+                .find((button) => /折叠反向/.test(button.textContent || ""));
+            collapseButton?.click();
+        });
+        await page.waitForTimeout(2600);
+        const after = await bridgeBottomBlankMetrics(page, "full layout after negative collapse");
+        await screenshot(page, "compat-full-negative-collapse-lora-space.png");
+        assert(after.negativeCollapsed, "Negative prompt row did not collapse in full-layout reclaim check", { before, after });
+        assertRoundedArrayEqual(after.nodeSize.map((value) => Math.round(value)), [1600, 1650],
+            "Full-layout negative collapse changed the node size", { before, after });
+        assert(after.blankBelowExtra !== null && after.blankBelowExtra <= 36,
+            "Large bottom blank remained after collapsing negative prompt in a full layout", { before, after });
+        assert((after.layoutState?.extra_height || 0) >= (before.layoutState?.extra_height || 0) + 240,
+            "LoRA section did not reclaim the space released by collapsing negative prompt", { before, after });
+        assert(after.extraMaxHeight === 520, "LoRA inline max marker changed unexpectedly", { before, after });
+        const bridgeConsoleErrors = consoleMessages.filter((message) =>
+            ["error", "pageerror"].includes(message.type) &&
+            /WebUI Prompt Bridge|WebUIPromptBridge|webui_prompt_bridge/i.test(message.text)
+        );
+        assert(bridgeConsoleErrors.length === 0, "WebUIPromptBridge reported console errors during full negative collapse reclaim check", bridgeConsoleErrors);
+        return {
+            beforeBlankBelowExtra: Math.round(before.blankBelowExtra),
+            afterBlankBelowExtra: Math.round(after.blankBelowExtra),
+            beforeExtraHeight: before.layoutState?.extra_height,
+            afterExtraHeight: after.layoutState?.extra_height,
+            bridgeConsoleErrors: bridgeConsoleErrors.length,
+        };
+    } finally {
+        await context.close();
+    }
+}
+
 async function verifySectionResizeBlankRecovery(browser, baseUrl, workflow) {
     const consoleMessages = [];
     const { context, page } = await newComfyPage(browser, baseUrl, consoleMessages, { width: 1600, height: 1300 });
@@ -984,6 +1077,136 @@ async function verifyCanvasPanDoesNotMutateBridgeLayout(browser, baseUrl, workfl
     }
 }
 
+async function verifyOffscreenCanvasPanDoesNotCollapseBridgeLayout(browser, baseUrl, workflow) {
+    const consoleMessages = [];
+    const { context, page } = await newComfyPage(browser, baseUrl, consoleMessages, { width: 1600, height: 1300 });
+    try {
+        await page.evaluate(async (graphData) => {
+            await window.app.loadGraphData(graphData, true, true, undefined, {
+                filename: "offscreen-canvas-pan-layout-stability.json",
+            });
+            window.app.canvas.ds.offset = [55, 35];
+            window.app.canvas.ds.scale = 1;
+            window.app.canvas.setDirty(true, true);
+        }, workflow);
+        await page.waitForTimeout(3500);
+        const before = await bridgeLayoutStabilitySnapshot(page, "before offscreen pan");
+        await page.evaluate(() => {
+            const bridge = window.app.graph._nodes.find((node) => node.type === "WebUIPromptBridge");
+            window.app.canvas.ds.offset = [
+                -bridge.pos[0] - bridge.size[0] - 900,
+                -bridge.pos[1] - bridge.size[1] - 900,
+            ];
+            window.app.canvas.setDirty(true, true);
+        });
+        await page.waitForTimeout(1600);
+        const hidden = await bridgeLayoutStabilitySnapshot(page, "hidden offscreen");
+        assert(hidden.panel?.height === 0 && hidden.extra?.height === 0,
+            "Bridge panel did not leave the viewport during offscreen pan check", { before, hidden });
+        for (const key of ["top_row_height", "extra_height"]) {
+            assert(Math.abs((hidden.layoutState?.[key] || 0) - (before.layoutState?.[key] || 0)) <= 2,
+                `Hidden Bridge layout state collapsed while node was offscreen: ${key}`, { before, hidden });
+        }
+        await page.evaluate(() => {
+            window.app.canvas.ds.offset = [55, 35];
+            window.app.canvas.setDirty(true, true);
+        });
+        await page.waitForTimeout(1800);
+        const after = await bridgeLayoutStabilitySnapshot(page, "after offscreen pan return");
+        await screenshot(page, "compat-offscreen-canvas-pan-layout-stability.png");
+        assertBridgeLayoutStable(before, after, "Offscreen canvas pan mutated Bridge layout");
+        for (const key of ["top_row_height", "extra_height"]) {
+            assert(Math.abs((after.layoutState?.[key] || 0) - (before.layoutState?.[key] || 0)) <= 2,
+                `Returned Bridge layout state changed after offscreen pan: ${key}`, { before, hidden, after });
+        }
+        const bridgeConsoleErrors = consoleMessages.filter((message) =>
+            ["error", "pageerror"].includes(message.type) &&
+            /WebUI Prompt Bridge|WebUIPromptBridge|webui_prompt_bridge/i.test(message.text)
+        );
+        assert(bridgeConsoleErrors.length === 0, "WebUIPromptBridge reported console errors during offscreen canvas pan check", bridgeConsoleErrors);
+        return {
+            beforeOffset: before.canvasOffset,
+            hiddenOffset: hidden.canvasOffset,
+            afterOffset: after.canvasOffset,
+            topRowHeight: after.topRow?.height,
+            extraHeight: after.extra?.height,
+            bridgeConsoleErrors: bridgeConsoleErrors.length,
+        };
+    } finally {
+        await context.close();
+    }
+}
+
+async function verifyLargeSavedLayoutSettlesAfterModeSwitch(browser, baseUrl, workflow) {
+    const consoleMessages = [];
+    const { context, page } = await newComfyPage(browser, baseUrl, consoleMessages, { width: 1800, height: 1500 });
+    try {
+        const largeWorkflow = JSON.parse(JSON.stringify(workflow));
+        for (const node of largeWorkflow.nodes || []) {
+            if (node.type !== "WebUIPromptBridge") continue;
+            node.size = [1600, 3000];
+            node.properties = {
+                ...(node.properties || {}),
+                webui_prompt_bridge_layout: {
+                    version: 1,
+                    top_row_height: 620,
+                    extra_height: 520,
+                    sidebar_width: 400,
+                    positive_textarea_height: 112,
+                    negative_textarea_height: 96,
+                    positive_chip_height: 132,
+                    negative_chip_height: 104,
+                    positive_tag_height: 190,
+                    negative_tag_height: 240,
+                    lora_scroll_top: 0,
+                    extra_collapsed: false,
+                    sidebar_collapsed: false,
+                    negative_collapsed: false,
+                },
+            };
+            break;
+        }
+        await page.evaluate(async (graphData) => {
+            await window.app.loadGraphData(graphData, true, true, undefined, {
+                filename: "large-saved-layout-mode-switch.json",
+            });
+            window.app.canvas.ds.offset = [20, 20];
+            window.app.canvas.ds.scale = 0.72;
+            window.app.canvas.setDirty(true, true);
+        }, largeWorkflow);
+        await page.waitForTimeout(3600);
+        const loaded = await bridgeLayoutStabilitySnapshot(page, "large saved layout loaded");
+        assert((loaded.promptContentBlank ?? 0) <= 80, "Large saved Bridge layout left a large blank inside the prompt area after load", { loaded });
+        assert(loaded.layoutState?.extra_height <= 540, "LoRA section grew too tall after loading a large saved node", { loaded });
+        await page.evaluate(() => {
+            [...document.querySelectorAll("button")]
+                .find((button) => (button.textContent || "").trim() === "纯模型质量")
+                ?.click();
+        });
+        await page.waitForTimeout(1600);
+        const after = await bridgeLayoutStabilitySnapshot(page, "large saved layout after quality switch");
+        await screenshot(page, "compat-large-saved-layout-mode-switch.png");
+        assert((after.promptContentBlank ?? 0) <= 80, "Large saved Bridge layout left a large blank inside the prompt area after mode switch", { loaded, after });
+        assertRoundedArrayEqual(after.nodeSize, [1600, 3000], "Large saved Bridge node size changed after mode switch", { loaded, after });
+        assert(after.layoutState?.extra_height <= 540, "LoRA section grew too tall after large-node mode switch", { loaded, after });
+        const bridgeConsoleErrors = consoleMessages.filter((message) =>
+            ["error", "pageerror"].includes(message.type) &&
+            /WebUI Prompt Bridge|WebUIPromptBridge|webui_prompt_bridge/i.test(message.text)
+        );
+        assert(bridgeConsoleErrors.length === 0, "WebUIPromptBridge reported console errors during large-node mode switch check", bridgeConsoleErrors);
+        return {
+            nodeSize: after.nodeSize,
+            loadedPromptContentBlank: loaded.promptContentBlank,
+            afterPromptContentBlank: after.promptContentBlank,
+            topRowHeight: after.layoutState?.top_row_height,
+            extraHeight: after.layoutState?.extra_height,
+            bridgeConsoleErrors: bridgeConsoleErrors.length,
+        };
+    } finally {
+        await context.close();
+    }
+}
+
 async function verifyRegionalCanvasSizeDoesNotMutateLayout(browser, baseUrl, workflow) {
     const consoleMessages = [];
     const { context, page } = await newComfyPage(browser, baseUrl, consoleMessages, { width: 1600, height: 1300 });
@@ -1144,12 +1367,12 @@ async function verifyFlatSavedBridgeSizeRepair(browser, baseUrl, workflow) {
     }
 }
 
-async function verifyOversizedSavedBridgeSizeRepairAndPortGutters(browser, baseUrl, workflow) {
+async function verifyLargeSavedBridgeSizePreservedAndPortGutters(browser, baseUrl, workflow) {
     const consoleMessages = [];
     const { context, page } = await newComfyPage(browser, baseUrl, consoleMessages, { width: 1600, height: 1200 });
     try {
-        const oversizedWorkflow = JSON.parse(JSON.stringify(workflow));
-        for (const node of oversizedWorkflow.nodes || []) {
+        const largeWorkflow = JSON.parse(JSON.stringify(workflow));
+        for (const node of largeWorkflow.nodes || []) {
             if (node.type === "WebUIPromptBridge") {
                 node.size = [1337, 1988];
                 break;
@@ -1157,12 +1380,12 @@ async function verifyOversizedSavedBridgeSizeRepairAndPortGutters(browser, baseU
         }
         await page.evaluate(async (graphData) => {
             await window.app.loadGraphData(graphData, true, true, undefined, {
-                filename: "oversized-saved-bridge-size-repair.json",
+                filename: "large-saved-bridge-size-preserved.json",
             });
             window.app.canvas.ds.offset = [80, 60];
             window.app.canvas.ds.scale = 1;
             window.app.canvas.setDirty(true, true);
-        }, oversizedWorkflow);
+        }, largeWorkflow);
         await page.waitForTimeout(3000);
         const report = await page.evaluate(() => {
             const bridge = window.app.graph._nodes.find((node) => node.type === "WebUIPromptBridge");
@@ -1204,8 +1427,10 @@ async function verifyOversizedSavedBridgeSizeRepairAndPortGutters(browser, baseU
                     .filter(Boolean),
             };
         });
-        await screenshot(page, "compat-oversized-saved-bridge-size-repair.png");
-        assert(report.nodeSize?.[1] <= 1300, "Oversized saved bridge height was not repaired", report);
+        await screenshot(page, "compat-large-saved-bridge-size-preserved.png");
+        assert(report.nodeSize?.[0] === 1337 && report.nodeSize?.[1] === 1988, "Large saved bridge size was not preserved", report);
+        assert(report.desiredSize?.[0] === 1337 && report.desiredSize?.[1] === 1988, "Large saved bridge desired size drifted", report);
+        assert(report.panelRect?.height >= 1900 && report.rootRect?.height >= 1900, "Large bridge DOM panel did not fill the resized node", report);
         assert(report.leftGutter >= 14 && report.rightGutter >= 14, "Bridge panel did not leave port-dot gutters", report);
         assert(report.leftGutter <= 28 && report.rightGutter <= 28, "Bridge panel still used wide internal port-label gutters", report);
         assert(report.externalSlotLabels.includes("model") && report.externalSlotLabels.includes("positive_text"), "Bridge external port-label overlay did not render expected labels", report);
@@ -1215,7 +1440,7 @@ async function verifyOversizedSavedBridgeSizeRepairAndPortGutters(browser, baseU
             ["error", "pageerror"].includes(message.type) &&
             /WebUI Prompt Bridge|WebUIPromptBridge|webui_prompt_bridge/i.test(message.text)
         );
-        assert(bridgeConsoleErrors.length === 0, "WebUIPromptBridge reported console errors during oversized repair check", bridgeConsoleErrors);
+        assert(bridgeConsoleErrors.length === 0, "WebUIPromptBridge reported console errors during large saved size check", bridgeConsoleErrors);
         return {
             nodeSize: report.nodeSize,
             leftGutter: report.leftGutter,
@@ -2589,13 +2814,16 @@ async function main() {
             currentWorkflowLayoutIdempotency: await verifyCurrentWorkflowLayoutIdempotency(browser, options.baseUrl, workflow),
             customWorkflowLayoutPreserved: await verifyCustomWorkflowLayoutPreserved(browser, options.baseUrl, workflow),
             bridgeUiErgonomics: await verifyBridgeUiErgonomics(browser, options.baseUrl, workflow),
+            fullNegativeCollapseReclaimsLoraSpace: await verifyFullNegativeCollapseReclaimsLoraSpace(browser, options.baseUrl, workflow),
             sectionResizeBlankRecovery: await verifySectionResizeBlankRecovery(browser, options.baseUrl, workflow),
             restoreSizeStability: await verifyRestoreSizeStability(browser, options.baseUrl, workflow),
             canvasPanDoesNotMutateBridgeLayout: await verifyCanvasPanDoesNotMutateBridgeLayout(browser, options.baseUrl, workflow),
+            offscreenCanvasPanDoesNotCollapseBridgeLayout: await verifyOffscreenCanvasPanDoesNotCollapseBridgeLayout(browser, options.baseUrl, workflow),
+            largeSavedLayoutSettlesAfterModeSwitch: await verifyLargeSavedLayoutSettlesAfterModeSwitch(browser, options.baseUrl, workflow),
             regionalCanvasSizeDoesNotMutateLayout: await verifyRegionalCanvasSizeDoesNotMutateLayout(browser, options.baseUrl, workflow),
             nodeSizeInputIsUserAuthority: await verifyNodeSizeInputIsUserAuthority(browser, options.baseUrl, workflow),
             flatSavedBridgeSizeRepair: await verifyFlatSavedBridgeSizeRepair(browser, options.baseUrl, workflow),
-            oversizedSavedBridgeSizeRepairAndPortGutters: await verifyOversizedSavedBridgeSizeRepairAndPortGutters(browser, options.baseUrl, workflow),
+            largeSavedBridgeSizePreservedAndPortGutters: await verifyLargeSavedBridgeSizePreservedAndPortGutters(browser, options.baseUrl, workflow),
             sidebarCollapsePersistenceAndSlotLabelCleanup: await verifySidebarCollapsePersistenceAndSlotLabelCleanup(browser, options.baseUrl, workflow),
             positiveTextareaManualHeightPersists: await verifyPositiveTextareaManualHeightPersists(browser, options.baseUrl, workflow),
             quickLoraDefaultVisibility: await verifyQuickLoraDefaultVisibility(browser, options.baseUrl, workflow),
