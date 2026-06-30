@@ -72,6 +72,14 @@ const BRIDGE_WIDGET_DEFINITIONS = [
     ["module_img2img_mode", "enum", "img2img", ["img2img", "inpaint"]],
     ["module_img2img_denoise", "number", 0.55],
     ["module_img2img_enabled", "boolean", false],
+    ["generation_size_enabled", "boolean", false],
+    ["generation_width", "integer", 1024],
+    ["generation_height", "integer", 1024],
+    ["generation_seed_enabled", "boolean", false],
+    ["generation_seed", "integer", 1],
+    ["generation_steps_enabled", "boolean", false],
+    ["generation_steps", "integer", 30],
+    ["generation_seed_mode", "enum", "fixed", ["fixed", "increment", "decrement", "randomize"]],
 ];
 const PROMPT_WIDGET_NAMES = BRIDGE_WIDGET_DEFINITIONS.map(([name]) => name);
 const PROMPT_WIDGETS = new Set(PROMPT_WIDGET_NAMES);
@@ -153,6 +161,12 @@ const EXTRA_NETWORKS_MAX_HEIGHT = PANEL_MAX_HEIGHT;
 const EXTRA_NETWORKS_INLINE_MAX_HEIGHT = 520;
 const DEFAULT_REGIONAL_CANVAS_WIDTH = 1024;
 const DEFAULT_REGIONAL_CANVAS_HEIGHT = 1024;
+const DEFAULT_GENERATION_WIDTH = 1024;
+const DEFAULT_GENERATION_HEIGHT = 1024;
+const DEFAULT_GENERATION_STEPS = 30;
+const MAX_GENERATION_STEPS = 10000;
+const DEFAULT_GENERATION_SEED = 1;
+const MAX_GENERATION_SEED = Number.MAX_SAFE_INTEGER;
 const REGIONAL_WIDTH_ALIASES = [
     "width",
     "image_width",
@@ -170,6 +184,26 @@ const REGIONAL_HEIGHT_ALIASES = [
     "target_height",
     "resize_height",
     "crop_height",
+];
+const GENERATION_SEED_ALIASES = [
+    "seed",
+    "noise_seed",
+    "noise seed",
+    "sampler_seed",
+];
+const GENERATION_SEED_CONTROL_ALIASES = [
+    "control_after_generate",
+    "control after generate",
+    "seed_control_after_generate",
+    "seed control after generate",
+];
+const GENERATION_SEED_MODE_OPTIONS = ["fixed", "increment", "decrement", "randomize"];
+const GENERATION_STEPS_ALIASES = [
+    "steps",
+    "sample_steps",
+    "sample steps",
+    "sampling_steps",
+    "sampling steps",
 ];
 const LAYOUT_STORAGE_VERSION = "2026-06-25-layout-authority-v1";
 const BRIDGE_LAYOUT_STATE_PROPERTY = "webui_prompt_bridge_layout";
@@ -248,6 +282,7 @@ const UI_VISIBILITY_DEFAULTS = {
     top_fail_on_missing: false,
     model_switch: true,
     regional_control: false,
+    generation_controls: true,
     size_controls: true,
     layout_presets: true,
     prompt_tools: true,
@@ -294,6 +329,7 @@ const SIDEBAR_VISIBILITY_OPTIONS = [
     ["top_fail_on_missing", "缺 LoRA 停止"],
     ["model_switch", "模型切换"],
     ["regional_control", "画布尺寸 / 区域控制"],
+    ["generation_controls", "生成参数"],
     ["size_controls", "尺寸快捷"],
     ["layout_presets", "布局预设"],
     ["prompt_tools", "Prompt 工具"],
@@ -2827,7 +2863,7 @@ function applyLegacyUpscaleMigration(values, next, fields) {
 
 function migrateBridgeFrontendWidgetValues(values) {
     if (!Array.isArray(values)) return { values, changed: false };
-    if (values.length !== PROMPT_WIDGET_NAMES.length + 1) return { values, changed: false };
+    if (values.length < 3 || values.length > PROMPT_WIDGET_NAMES.length + 1) return { values, changed: false };
     const first = values[0];
     const firstIsFrontendPlaceholder = first === null || first === undefined || first === "";
     const shiftedPositive = typeof values[1] === "string" && values[1].trim() !== "";
@@ -3091,6 +3127,33 @@ function normalizeRegionalCanvasSize(width, height, fallbackWidth = DEFAULT_REGI
     };
 }
 
+function normalizeGenerationSeed(value, fallback = DEFAULT_GENERATION_SEED) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return fallback;
+    return Math.min(MAX_GENERATION_SEED, Math.max(0, Math.round(numeric)));
+}
+
+function normalizeGenerationSteps(value, fallback = DEFAULT_GENERATION_STEPS) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return fallback;
+    return Math.min(MAX_GENERATION_STEPS, Math.max(1, Math.round(numeric)));
+}
+
+function normalizeGenerationSeedMode(value, fallback = "fixed") {
+    const text = String(value || "").trim();
+    return GENERATION_SEED_MODE_OPTIONS.includes(text) ? text : fallback;
+}
+
+function randomGenerationSeed() {
+    try {
+        const buffer = new Uint32Array(2);
+        crypto.getRandomValues(buffer);
+        return normalizeGenerationSeed(((buffer[0] & 0x1fffff) * 0x100000000) + buffer[1], DEFAULT_GENERATION_SEED);
+    } catch {
+        return Math.floor(Math.random() * (MAX_GENERATION_SEED + 1));
+    }
+}
+
 function compactKey(value) {
     return String(value || "").replace(/[\s_\-]+/g, "").toLowerCase();
 }
@@ -3113,6 +3176,14 @@ function widgetByAliases(graphNode, aliases) {
     return null;
 }
 
+function inputSlotByAliases(graphNode, aliases) {
+    const wanted = new Set(aliases.map(compactKey));
+    return (graphNode?.inputs || []).findIndex((input) => {
+        const keys = [input?.name, input?.label, input?.localized_name].map(compactKey);
+        return keys.some((key) => wanted.has(key));
+    });
+}
+
 function parseSizeText(value) {
     const match = String(value ?? "").match(/\b(\d{2,5})\s*[xX×*]\s*(\d{2,5})\b/);
     if (!match) return null;
@@ -3127,7 +3198,45 @@ function regionalNodeLabel(graphNode) {
     return String(graphNode?.title || graphNode?.type || `Node ${graphNode?.id ?? ""}`).trim();
 }
 
+function regionalLinkedDimensionTarget(graphNode, inputSlot, aliases) {
+    if (!graphNode || inputSlot < 0) return null;
+    const source = linkedSourceNode(graphNode, inputSlot);
+    if (!source) return null;
+    const widget = widgetByAliases(source, ["value", ...aliases]) || (
+        (source.widgets || []).length === 1 ? source.widgets[0] : null
+    );
+    if (!widget) return null;
+    return {
+        node: source,
+        widget,
+        source: regionalNodeLabel(source),
+    };
+}
+
+function linkedWidgetTargetByAliases(graphNode, aliases) {
+    const inputSlot = inputSlotByAliases(graphNode, aliases);
+    return regionalLinkedDimensionTarget(graphNode, inputSlot, aliases);
+}
+
+function regionalCanvasLinkedDimensions(graphNode) {
+    const widthSlot = inputSlotByAliases(graphNode, REGIONAL_WIDTH_ALIASES);
+    const heightSlot = inputSlotByAliases(graphNode, REGIONAL_HEIGHT_ALIASES);
+    const widthTarget = regionalLinkedDimensionTarget(graphNode, widthSlot, REGIONAL_WIDTH_ALIASES);
+    const heightTarget = regionalLinkedDimensionTarget(graphNode, heightSlot, REGIONAL_HEIGHT_ALIASES);
+    if (!widthTarget && !heightTarget) return null;
+    const width = widthTarget ? widthTarget.widget.value : widgetValueByAliases(graphNode, REGIONAL_WIDTH_ALIASES);
+    const height = heightTarget ? heightTarget.widget.value : widgetValueByAliases(graphNode, REGIONAL_HEIGHT_ALIASES);
+    if (width === undefined || height === undefined) return null;
+    const size = normalizeRegionalCanvasSize(width, height, null, null);
+    if (!size.width || !size.height) return null;
+    const sources = [widthTarget?.source, heightTarget?.source].filter(Boolean);
+    const source = sources.length ? `${[...new Set(sources)].join(" / ")} -> ${regionalNodeLabel(graphNode)}` : regionalNodeLabel(graphNode);
+    return { ...size, source };
+}
+
 function regionalCanvasSizeFromWidgets(graphNode) {
+    const linked = regionalCanvasLinkedDimensions(graphNode);
+    if (linked) return linked;
     const width = widgetValueByAliases(graphNode, REGIONAL_WIDTH_ALIASES);
     const height = widgetValueByAliases(graphNode, REGIONAL_HEIGHT_ALIASES);
     if (width !== undefined && height !== undefined) {
@@ -3147,14 +3256,23 @@ function regionalCanvasSizeFromWidgets(graphNode) {
 }
 
 function regionalCanvasWritableTarget(graphNode) {
-    const widthWidget = widgetByAliases(graphNode, REGIONAL_WIDTH_ALIASES);
-    const heightWidget = widgetByAliases(graphNode, REGIONAL_HEIGHT_ALIASES);
-    if (!widthWidget || !heightWidget) return null;
+    const widthSlot = inputSlotByAliases(graphNode, REGIONAL_WIDTH_ALIASES);
+    const heightSlot = inputSlotByAliases(graphNode, REGIONAL_HEIGHT_ALIASES);
+    const linkedWidth = regionalLinkedDimensionTarget(graphNode, widthSlot, REGIONAL_WIDTH_ALIASES);
+    const linkedHeight = regionalLinkedDimensionTarget(graphNode, heightSlot, REGIONAL_HEIGHT_ALIASES);
+    const widthWidget = linkedWidth?.widget || widgetByAliases(graphNode, REGIONAL_WIDTH_ALIASES);
+    const heightWidget = linkedHeight?.widget || widgetByAliases(graphNode, REGIONAL_HEIGHT_ALIASES);
+    const widthNode = linkedWidth?.node || graphNode;
+    const heightNode = linkedHeight?.node || graphNode;
+    if (!widthWidget || !heightWidget || !widthNode || !heightNode) return null;
+    const sources = [linkedWidth?.source, linkedHeight?.source].filter(Boolean);
     return {
         node: graphNode,
+        widthNode,
+        heightNode,
         widthWidget,
         heightWidget,
-        source: regionalNodeLabel(graphNode),
+        source: sources.length ? `${[...new Set(sources)].join(" / ")} -> ${regionalNodeLabel(graphNode)}` : regionalNodeLabel(graphNode),
     };
 }
 
@@ -3315,6 +3433,24 @@ function setGraphNodeWidgetObjectValue(graphNode, widget, value) {
     return true;
 }
 
+function generationSeedControlValue(widget, mode = "fixed") {
+    const normalizedMode = normalizeGenerationSeedMode(mode);
+    const values = Array.isArray(widget?.options?.values) ? widget.options.values : [];
+    return values.find((value) => compactKey(value) === compactKey(normalizedMode)) ?? normalizedMode;
+}
+
+function generationSeedModeFromNode(graphNode) {
+    const widget = widgetByAliases(graphNode, GENERATION_SEED_CONTROL_ALIASES);
+    if (!widget) return null;
+    return normalizeGenerationSeedMode(widget.value, null);
+}
+
+function setGenerationSeedControlMode(graphNode, mode = "fixed") {
+    const widget = widgetByAliases(graphNode, GENERATION_SEED_CONTROL_ALIASES);
+    if (!widget) return false;
+    return setGraphNodeWidgetObjectValue(graphNode, widget, generationSeedControlValue(widget, mode));
+}
+
 function applyRegionalCanvasSizeToGraph(bridgeNode, width, height) {
     const size = normalizeRegionalCanvasSize(width, height);
     const target = detectRegionalCanvasTargetFromGraph(bridgeNode);
@@ -3326,8 +3462,8 @@ function applyRegionalCanvasSizeToGraph(bridgeNode, width, height) {
             message: "未找到可写入宽高的 Image Size / Resize 节点",
         };
     }
-    const widthOk = setGraphNodeWidgetObjectValue(target.node, target.widthWidget, size.width);
-    const heightOk = setGraphNodeWidgetObjectValue(target.node, target.heightWidget, size.height);
+    const widthOk = setGraphNodeWidgetObjectValue(target.widthNode || target.node, target.widthWidget, size.width);
+    const heightOk = setGraphNodeWidgetObjectValue(target.heightNode || target.node, target.heightWidget, size.height);
     return {
         ok: widthOk && heightOk,
         width: size.width,
@@ -3336,6 +3472,241 @@ function applyRegionalCanvasSizeToGraph(bridgeNode, width, height) {
         message: widthOk && heightOk
             ? `已同步尺寸到 ${target.source}`
             : `找到 ${target.source}，但宽高写入失败`,
+    };
+}
+
+function generationSeedTarget(graphNode) {
+    const linked = linkedWidgetTargetByAliases(graphNode, GENERATION_SEED_ALIASES);
+    const widget = linked?.widget || widgetByAliases(graphNode, GENERATION_SEED_ALIASES);
+    if (!widget) return null;
+    return {
+        node: graphNode,
+        targetNode: linked?.node || graphNode,
+        widget,
+        source: linked ? `${linked.source} -> ${regionalNodeLabel(graphNode)}` : regionalNodeLabel(graphNode),
+    };
+}
+
+function generationSeedTargetLooksPrimary(graphNode) {
+    const text = `${graphNode?.type || ""} ${graphNode?.title || ""} ${graphNode?.properties?.["Node name for S&R"] || ""}`.toLowerCase();
+    return /ksampler|sampler|sample|noise/.test(text) || looksLikeSamplerNode(graphNode);
+}
+
+function collectGenerationSeedTargets(bridgeNode) {
+    const targets = [];
+    const seen = new Set();
+    const addTarget = (graphNode) => {
+        const target = generationSeedTarget(graphNode);
+        if (!target || seen.has(target.node?.id)) return;
+        seen.add(target.node?.id);
+        targets.push(target);
+    };
+
+    for (const graphNode of collectRegionalDownstreamNodes(bridgeNode, 8)) {
+        if (generationSeedTargetLooksPrimary(graphNode)) addTarget(graphNode);
+    }
+    if (targets.length) return targets;
+
+    for (const graphNode of getGraphNodes()) {
+        if (generationSeedTargetLooksPrimary(graphNode)) addTarget(graphNode);
+    }
+    return targets;
+}
+
+function generationSeedTargetPriority(target) {
+    const text = `${target?.node?.type || ""} ${target?.node?.title || ""} ${target?.node?.properties?.["Node name for S&R"] || ""}`.toLowerCase();
+    let priority = 0;
+    if (/hires|refiner|upscale|detail|face|hand|tile/.test(text)) priority += 10;
+    if (/ksampler|sampler/.test(text)) priority -= 1;
+    return priority;
+}
+
+function generationSeedValueFromWidget(widget) {
+    const value = widget?.value;
+    if (value === undefined || value === null || value === "") return null;
+    return normalizeGenerationSeed(value, null);
+}
+
+function detectGenerationSeedFromGraph(bridgeNode) {
+    const candidates = collectGenerationSeedTargets(bridgeNode)
+        .map((target, index) => ({
+            ...target,
+            index,
+            seed: generationSeedValueFromWidget(target.widget),
+        }))
+        .filter((target) => target.seed !== null)
+        .sort((a, b) => generationSeedTargetPriority(a) - generationSeedTargetPriority(b) || a.index - b.index);
+    if (!candidates.length) return null;
+    const primary = candidates[0];
+    const differentCount = candidates.filter((target) => target.seed !== primary.seed).length;
+    return {
+        seed: primary.seed,
+        mode: generationSeedModeFromNode(primary.node) || "fixed",
+        source: primary.source,
+        count: candidates.length,
+        differentCount,
+    };
+}
+
+function generationStepsTarget(graphNode) {
+    const linked = linkedWidgetTargetByAliases(graphNode, GENERATION_STEPS_ALIASES);
+    const widget = linked?.widget || widgetByAliases(graphNode, GENERATION_STEPS_ALIASES);
+    if (!widget) return null;
+    return {
+        node: graphNode,
+        targetNode: linked?.node || graphNode,
+        widget,
+        source: linked ? `${linked.source} -> ${regionalNodeLabel(graphNode)}` : regionalNodeLabel(graphNode),
+    };
+}
+
+function collectGenerationStepsTargets(bridgeNode) {
+    const targets = [];
+    const seen = new Set();
+    const addTarget = (graphNode) => {
+        const target = generationStepsTarget(graphNode);
+        if (!target || seen.has(target.node?.id)) return;
+        seen.add(target.node?.id);
+        targets.push(target);
+    };
+
+    for (const graphNode of collectRegionalDownstreamNodes(bridgeNode, 8)) {
+        if (generationSeedTargetLooksPrimary(graphNode)) addTarget(graphNode);
+    }
+    if (targets.length) return targets;
+
+    for (const graphNode of getGraphNodes()) {
+        if (generationSeedTargetLooksPrimary(graphNode)) addTarget(graphNode);
+    }
+    return targets;
+}
+
+function generationStepsValueFromWidget(widget) {
+    const value = widget?.value;
+    if (value === undefined || value === null || value === "") return null;
+    return normalizeGenerationSteps(value, null);
+}
+
+function detectGenerationStepsFromGraph(bridgeNode) {
+    const candidates = collectGenerationStepsTargets(bridgeNode)
+        .map((target, index) => ({
+            ...target,
+            index,
+            steps: generationStepsValueFromWidget(target.widget),
+        }))
+        .filter((target) => target.steps !== null)
+        .sort((a, b) => generationSeedTargetPriority(a) - generationSeedTargetPriority(b) || a.index - b.index);
+    if (!candidates.length) return null;
+    const primary = candidates[0];
+    const differentCount = candidates.filter((target) => target.steps !== primary.steps).length;
+    return {
+        steps: primary.steps,
+        source: primary.source,
+        count: candidates.length,
+        differentCount,
+    };
+}
+
+function applyGenerationStepsToGraph(bridgeNode, steps) {
+    const nextSteps = normalizeGenerationSteps(steps);
+    const targets = collectGenerationStepsTargets(bridgeNode);
+    if (!targets.length) {
+        return {
+            ok: false,
+            steps: nextSteps,
+            count: 0,
+            message: "未找到可写入 Steps 的采样器",
+        };
+    }
+    let changed = 0;
+    for (const target of targets) {
+        if (setGraphNodeWidgetObjectValue(target.targetNode || target.node, target.widget, nextSteps)) changed += 1;
+    }
+    return {
+        ok: changed > 0,
+        steps: nextSteps,
+        count: changed,
+        message: changed > 0
+            ? `已同步 Steps ${nextSteps} 到 ${changed} 个采样器`
+            : `找到采样器，但 Steps ${nextSteps} 写入失败`,
+    };
+}
+
+function applyGenerationSeedToGraph(bridgeNode, seed, mode = "fixed") {
+    const nextSeed = normalizeGenerationSeed(seed);
+    const nextMode = normalizeGenerationSeedMode(mode);
+    const targets = collectGenerationSeedTargets(bridgeNode);
+    if (!targets.length) {
+        return {
+            ok: false,
+            seed: nextSeed,
+            mode: nextMode,
+            count: 0,
+            message: "未找到可写入 Seed 的采样器",
+        };
+    }
+    let changed = 0;
+    let seedModesChanged = 0;
+    for (const target of targets) {
+        if (setGraphNodeWidgetObjectValue(target.targetNode || target.node, target.widget, nextSeed)) {
+            changed += 1;
+            if (setGenerationSeedControlMode(target.node, nextMode)) seedModesChanged += 1;
+        }
+    }
+    return {
+        ok: changed > 0,
+        seed: nextSeed,
+        mode: nextMode,
+        count: changed,
+        seedModesChanged,
+        message: changed > 0
+            ? `已同步 Seed ${nextSeed} 到 ${changed} 个采样器${seedModesChanged ? `，Seed 模式 ${nextMode}` : ""}`
+            : `找到采样器，但 Seed ${nextSeed} 写入失败`,
+    };
+}
+
+function applyGenerationControlsToGraph(bridgeNode, controls) {
+    const messages = [];
+    const errors = [];
+    let changed = 0;
+    if (controls.sizeEnabled) {
+        const size = normalizeRegionalCanvasSize(controls.width, controls.height, DEFAULT_GENERATION_WIDTH, DEFAULT_GENERATION_HEIGHT);
+        const result = applyRegionalCanvasSizeToGraph(bridgeNode, size.width, size.height);
+        if (result.ok) {
+            changed += 1;
+            messages.push(`尺寸 ${size.width}x${size.height}`);
+        } else {
+            errors.push(result.message);
+        }
+    }
+    if (controls.stepsEnabled) {
+        const result = applyGenerationStepsToGraph(bridgeNode, controls.steps);
+        if (result.ok) {
+            changed += result.count;
+            messages.push(`Steps ${result.steps}`);
+        } else {
+            errors.push(result.message);
+        }
+    }
+    if (controls.seedEnabled) {
+        const result = applyGenerationSeedToGraph(bridgeNode, controls.seed, controls.seedMode);
+        if (result.ok) {
+            changed += result.count;
+            messages.push(`Seed ${result.seed} (${result.mode})`);
+        } else {
+            errors.push(result.message);
+        }
+    }
+    if (errors.length) {
+        return { ok: false, changed, message: errors.join("；") };
+    }
+    if (!messages.length) {
+        return { ok: true, changed: 0, message: "" };
+    }
+    return {
+        ok: true,
+        changed,
+        message: `已接管生成参数：${messages.join("；")}`,
     };
 }
 
@@ -7102,6 +7473,11 @@ function createPromptRow(label, value, placeholder, onFocus, onInput, options = 
     let chipBottomGrip = null;
     const markManualResize = (detail = {}) => options.onManualResize?.({ row, textarea, chips, ...detail });
     const applyCollapsedState = (nextCollapsed) => {
+        const ownerPanel = row?.closest?.(".webui-bridge-panel");
+        const collapseLayoutBefore = ownerPanel ? {
+            topHeight: resizeTargetLayoutHeight(ownerPanel.querySelector?.(".webui-bridge-toprow")),
+            extraHeight: resizeTargetLayoutHeight(ownerPanel.querySelector?.(".webui-bridge-extra")),
+        } : null;
         collapsed = Boolean(nextCollapsed);
         row?.classList.toggle("collapsed", collapsed);
         const prompts = row?.closest(".webui-bridge-prompts");
@@ -7112,8 +7488,7 @@ function createPromptRow(label, value, placeholder, onFocus, onInput, options = 
         for (const part of [textarea, chips, textChipGrip, chipBottomGrip, counter]) {
             if (part) part.style.display = collapsed ? "none" : "";
         }
-        const ownerPanel = row?.closest?.(".webui-bridge-panel");
-        ownerPanel?.__webuiBridgeHandlePromptCollapseChange?.({ collapsed, row });
+        ownerPanel?.__webuiBridgeHandlePromptCollapseChange?.({ collapsed, row, before: collapseLayoutBefore });
         ownerPanel?.__webuiBridgeScheduleAdaptiveLayout?.();
     };
     if (options.collapsible) {
@@ -7773,6 +8148,14 @@ function buildPanel(node) {
     const moduleUpscaleTileHeightWidget = getWidget(node, "module_upscale_tile_height");
     const moduleUpscaleOverlapWidget = getWidget(node, "module_upscale_overlap");
     const moduleRegionalLoraEnabledWidget = getWidget(node, "module_regional_lora_enabled");
+    const generationSizeEnabledWidget = getWidget(node, "generation_size_enabled");
+    const generationWidthWidget = getWidget(node, "generation_width");
+    const generationHeightWidget = getWidget(node, "generation_height");
+    const generationStepsEnabledWidget = getWidget(node, "generation_steps_enabled");
+    const generationStepsWidget = getWidget(node, "generation_steps");
+    const generationSeedEnabledWidget = getWidget(node, "generation_seed_enabled");
+    const generationSeedWidget = getWidget(node, "generation_seed");
+    const generationSeedModeWidget = getWidget(node, "generation_seed_mode");
     const initialClipStrength = repairClipStrengthWidget(node);
     const state = {
         bridgeNode: node,
@@ -7798,6 +8181,7 @@ function buildPanel(node) {
     let clearPromptPlacementWarning = () => {};
     let statusTimer = null;
     let syncRegionalWidgets = () => {};
+    let syncGenerationWidgets = () => {};
     let renderModuleAssetStatuses = () => {};
     const {
         top_row_height: topRowHeightKey,
@@ -7828,6 +8212,7 @@ function buildPanel(node) {
         setWidgetValue(node, "positive_prompt", positive.textarea.value);
         setWidgetValue(node, "negative_prompt", negative.textarea.value);
         syncRegionalWidgets?.();
+        syncGenerationWidgets?.();
         updateCounters();
     };
 
@@ -8255,6 +8640,236 @@ function buildPanel(node) {
         }, 700);
     };
     startRegionalCanvasAutoSync();
+
+    const generationSizeEnabledInput = el("input", {
+        type: "checkbox",
+        title: "开启后，Generate 前同步宽高到实际生成尺寸节点",
+    });
+    generationSizeEnabledInput.checked = generationSizeEnabledWidget
+        ? sanitizeBridgeWidgetValue("generation_size_enabled", generationSizeEnabledWidget.value)
+        : false;
+    const generationWidthInput = el("input", {
+        class: "webui-bridge-generation-input",
+        type: "number",
+        min: "64",
+        max: "16384",
+        step: "8",
+        value: bridgeWidgetValue(node, "generation_width", DEFAULT_GENERATION_WIDTH),
+        title: "生成图片宽度",
+    });
+    const generationHeightInput = el("input", {
+        class: "webui-bridge-generation-input",
+        type: "number",
+        min: "64",
+        max: "16384",
+        step: "8",
+        value: bridgeWidgetValue(node, "generation_height", DEFAULT_GENERATION_HEIGHT),
+        title: "生成图片高度",
+    });
+    const generationStepsEnabledInput = el("input", {
+        type: "checkbox",
+        title: "开启后，Generate 前同步 Steps 到下游采样器",
+    });
+    generationStepsEnabledInput.checked = generationStepsEnabledWidget
+        ? sanitizeBridgeWidgetValue("generation_steps_enabled", generationStepsEnabledWidget.value)
+        : false;
+    const generationStepsInput = el("input", {
+        class: "webui-bridge-generation-input",
+        type: "number",
+        min: "1",
+        max: String(MAX_GENERATION_STEPS),
+        step: "1",
+        value: bridgeWidgetValue(node, "generation_steps", DEFAULT_GENERATION_STEPS),
+        title: "采样步数 Steps",
+    });
+    const generationSeedEnabledInput = el("input", {
+        type: "checkbox",
+        title: "开启后，Generate 前同步 Seed 和 Seed 模式到下游采样器",
+    });
+    generationSeedEnabledInput.checked = generationSeedEnabledWidget
+        ? sanitizeBridgeWidgetValue("generation_seed_enabled", generationSeedEnabledWidget.value)
+        : false;
+    const generationSeedInput = el("input", {
+        class: "webui-bridge-generation-input webui-bridge-generation-seed",
+        type: "number",
+        min: "0",
+        max: String(MAX_GENERATION_SEED),
+        step: "1",
+        value: bridgeWidgetValue(node, "generation_seed", DEFAULT_GENERATION_SEED),
+        title: "生成 Seed",
+    });
+    const generationSeedModeSelect = el("select", {
+        class: "webui-bridge-generation-input webui-bridge-generation-mode",
+        title: "KSampler control_after_generate",
+    }, GENERATION_SEED_MODE_OPTIONS.map((value) => el("option", { value }, value)));
+    generationSeedModeSelect.value = generationSeedModeWidget
+        ? sanitizeBridgeWidgetValue("generation_seed_mode", generationSeedModeWidget.value)
+        : "fixed";
+    const generationStatus = el("div", { class: "webui-bridge-generation-status" });
+    const readGenerationControls = () => {
+        const size = normalizeRegionalCanvasSize(
+            generationWidthInput.value,
+            generationHeightInput.value,
+            DEFAULT_GENERATION_WIDTH,
+            DEFAULT_GENERATION_HEIGHT,
+        );
+        return {
+            sizeEnabled: generationSizeEnabledInput.checked,
+            width: size.width,
+            height: size.height,
+            stepsEnabled: generationStepsEnabledInput.checked,
+            steps: normalizeGenerationSteps(generationStepsInput.value, DEFAULT_GENERATION_STEPS),
+            seedEnabled: generationSeedEnabledInput.checked,
+            seed: normalizeGenerationSeed(generationSeedInput.value, DEFAULT_GENERATION_SEED),
+            seedMode: normalizeGenerationSeedMode(generationSeedModeSelect.value),
+        };
+    };
+    const renderGenerationControls = () => {
+        const controls = readGenerationControls();
+        generationWidthInput.disabled = !controls.sizeEnabled;
+        generationHeightInput.disabled = !controls.sizeEnabled;
+        generationStepsInput.disabled = !controls.stepsEnabled;
+        generationSeedInput.disabled = !controls.seedEnabled;
+        generationSeedModeSelect.disabled = !controls.seedEnabled;
+        const active = [];
+        if (controls.sizeEnabled) active.push(`${controls.width}x${controls.height}`);
+        if (controls.stepsEnabled) active.push(`${controls.steps} steps`);
+        if (controls.seedEnabled) active.push(`Seed ${controls.seed} · ${controls.seedMode}`);
+        generationStatus.textContent = active.length ? active.join(" · ") : "未接管";
+    };
+    syncGenerationWidgets = () => {
+        const controls = readGenerationControls();
+        generationWidthInput.value = String(controls.width);
+        generationHeightInput.value = String(controls.height);
+        generationStepsInput.value = String(controls.steps);
+        generationSeedInput.value = String(controls.seed);
+        generationSeedModeSelect.value = controls.seedMode;
+        setWidgetValue(node, "generation_size_enabled", controls.sizeEnabled);
+        setWidgetValue(node, "generation_width", controls.width);
+        setWidgetValue(node, "generation_height", controls.height);
+        setWidgetValue(node, "generation_steps_enabled", controls.stepsEnabled);
+        setWidgetValue(node, "generation_steps", controls.steps);
+        setWidgetValue(node, "generation_seed_enabled", controls.seedEnabled);
+        setWidgetValue(node, "generation_seed", controls.seed);
+        setWidgetValue(node, "generation_seed_mode", controls.seedMode);
+        renderGenerationControls();
+    };
+    const applyGenerationControlsFromSidebar = () => {
+        syncGenerationWidgets();
+        const result = applyGenerationControlsToGraph(node, readGenerationControls());
+        setStatus(result.message || "生成参数未接管", { kind: result.ok ? "success" : "error" });
+        return result;
+    };
+    const detectGenerationSizeButton = el("button", {
+        class: "webui-bridge-generation-button",
+        type: "button",
+        title: "读取当前工作流的生成尺寸、Steps、主采样器 Seed 和 Seed 模式",
+        onclick: () => {
+            const detectedSize = detectRegionalCanvasSizeFromGraph(node);
+            const detectedSteps = detectGenerationStepsFromGraph(node);
+            const detectedSeed = detectGenerationSeedFromGraph(node);
+            const messages = [];
+            if (detectedSize) {
+                generationSizeEnabledInput.checked = true;
+                generationWidthInput.value = String(detectedSize.width);
+                generationHeightInput.value = String(detectedSize.height);
+                messages.push(`尺寸 ${detectedSize.width}x${detectedSize.height}`);
+            }
+            if (detectedSteps) {
+                generationStepsEnabledInput.checked = true;
+                generationStepsInput.value = String(detectedSteps.steps);
+                messages.push(`Steps ${detectedSteps.steps}`);
+            }
+            if (detectedSeed) {
+                generationSeedEnabledInput.checked = true;
+                generationSeedInput.value = String(detectedSeed.seed);
+                generationSeedModeSelect.value = normalizeGenerationSeedMode(detectedSeed.mode);
+                messages.push(`Seed ${detectedSeed.seed}`);
+            }
+            if (!messages.length) {
+                setStatus("未检测到生成尺寸、Steps 或 KSampler Seed，请手动填写", { kind: "error" });
+                return;
+            }
+            syncGenerationWidgets();
+            const stepsNote = detectedSteps?.differentCount
+                ? `；多个采样器 Steps 不同，已读取 ${detectedSteps.source}`
+                : "";
+            const seedNote = detectedSeed?.differentCount
+                ? `；多个采样器 Seed 不同，已读取 ${detectedSeed.source}`
+                : "";
+            setStatus(`已读取生成参数: ${messages.join("；")}${stepsNote}${seedNote}`);
+        },
+    }, "读取");
+    const randomSeedButton = el("button", {
+        class: "webui-bridge-generation-button",
+        type: "button",
+        title: "生成随机 Seed 并开启接管",
+        onclick: () => {
+            generationSeedEnabledInput.checked = true;
+            generationSeedInput.value = String(randomGenerationSeed());
+            syncGenerationWidgets();
+        },
+    }, "随机");
+    const applyGenerationButton = el("button", {
+        class: "webui-bridge-generation-button primary",
+        type: "button",
+        title: "立即同步到当前工作流",
+        onclick: applyGenerationControlsFromSidebar,
+    }, "应用");
+    const generationField = (label, input) => el("label", { class: "webui-bridge-generation-field" }, [
+        el("span", {}, label),
+        input,
+    ]);
+    const generationSeedField = generationField("Seed", generationSeedInput);
+    generationSeedField.classList.add("webui-bridge-generation-seed-field");
+    const generationSeedModeField = generationField("Seed模式", generationSeedModeSelect);
+    generationSeedModeField.classList.add("webui-bridge-generation-wide-field");
+    const generationControls = el("details", {
+        class: "webui-bridge-generation-section",
+        open: "open",
+        "data-layout-comfort": "false",
+    }, [
+        el("summary", {}, [
+            el("span", {}, "生成参数"),
+            generationStatus,
+        ]),
+        el("div", { class: "webui-bridge-generation-grid" }, [
+            el("label", { class: "webui-bridge-generation-toggle" }, [
+                generationSizeEnabledInput,
+                el("span", {}, "接管尺寸"),
+            ]),
+            detectGenerationSizeButton,
+            generationField("宽", generationWidthInput),
+            generationField("高", generationHeightInput),
+            el("label", { class: "webui-bridge-generation-toggle" }, [
+                generationStepsEnabledInput,
+                el("span", {}, "接管 Steps"),
+            ]),
+            generationField("Steps", generationStepsInput),
+            el("label", { class: "webui-bridge-generation-toggle" }, [
+                generationSeedEnabledInput,
+                el("span", {}, "接管 Seed"),
+            ]),
+            randomSeedButton,
+            generationSeedField,
+            generationSeedModeField,
+            applyGenerationButton,
+        ]),
+    ]);
+    for (const control of [generationSizeEnabledInput, generationStepsEnabledInput, generationSeedEnabledInput]) {
+        control.addEventListener("change", syncGenerationWidgets);
+    }
+    for (const control of [generationWidthInput, generationHeightInput, generationStepsInput, generationSeedInput]) {
+        control.addEventListener("change", syncGenerationWidgets);
+        control.addEventListener("keydown", (event) => {
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            syncGenerationWidgets();
+            event.currentTarget.blur();
+        });
+    }
+    generationSeedModeSelect.addEventListener("change", syncGenerationWidgets);
+    renderGenerationControls();
 
     const regionalPromptState = () => {
         const positiveParts = parseRegionalPromptParts(positive.textarea.value);
@@ -11656,8 +12271,13 @@ function buildPanel(node) {
             showPromptPlacementWarning();
             return;
         }
+        const generationResult = applyGenerationControlsToGraph(node, readGenerationControls());
+        if (!generationResult.ok) {
+            setStatus(`生成参数接管失败: ${generationResult.message}`, { kind: "error", sticky: true });
+            return;
+        }
         try {
-            setStatus("正在提交生成任务...");
+            setStatus(generationResult.message ? `${generationResult.message}，正在提交...` : "正在提交生成任务...");
             scheduleDomWidgetLayoutStabilization();
             const preflightRepairs = repairStaleInputLinks();
             if (preflightRepairs) setStatus(`已修复 ${preflightRepairs} 个悬空参数连接，正在提交...`);
@@ -12618,6 +13238,7 @@ function buildPanel(node) {
         el("button", { class: "webui-bridge-generate", title: "Queue Prompt", onclick: queuePrompt }, "Generate"),
         status,
         bindVisibility(modelSwitchControls, "model_switch"),
+        bindVisibility(generationControls, "generation_controls"),
         bindVisibility(regionalSection, "regional_control"),
         regionalModuleSection,
         bindVisibility(animaModeControls, "model_switch"),
@@ -12686,6 +13307,48 @@ function buildPanel(node) {
     const getExtraResizeComfortHeight = () => extraCollapsed
         ? 42
         : Math.max(getExtraVisibleFloor(), EXTRA_NETWORKS_CARD_ROW_MIN_HEIGHT + 96);
+    const reclaimLoraSpaceAfterNegativeCollapse = (before = null) => {
+        if (!negative.row?.classList?.contains("collapsed")) return false;
+        if (extraCollapsed || loraOverlayOpen || !topRow?.isConnected || !extraSection?.isConnected) return false;
+        const currentTop = resizeTargetLayoutHeight(topRow) || 0;
+        const currentExtra = resizeTargetLayoutHeight(extraSection) || 0;
+        const sourceTop = Number(before?.topHeight || currentTop || 0);
+        const sourceExtra = Number(before?.extraHeight || currentExtra || 0);
+        if (sourceTop <= 0 || sourceExtra <= 0) return false;
+        const presetTopTargets = {
+            compact: 420,
+            roomy: 840,
+            positive_focus: 500,
+            minimal_lora: 460,
+            default: 560,
+        };
+        const topMin = getTopRowVisibleMinHeight();
+        const topMax = Math.min(getTopRowVisibleMaxHeight(), Math.max(sourceTop, currentTop, topMin));
+        const preferredTop = presetTopTargets[state.settings?.layout_preset || "default"] || presetTopTargets.default;
+        let nextTop = clampNumber(Math.min(sourceTop, preferredTop), topMin, topMax);
+        let targetExtra = sourceExtra + Math.max(0, sourceTop - nextTop);
+        targetExtra = Math.max(targetExtra, EXTRA_NETWORKS_USABLE_MIN_HEIGHT);
+        targetExtra = clampNumber(targetExtra, getExtraVisibleFloor(), getExtraResizeMaxHeight());
+        if (targetExtra <= currentExtra + 1 && Math.abs(currentTop - nextTop) < 2) return false;
+        const extraIncrease = Math.max(0, targetExtra - currentExtra);
+        if (extraIncrease > 0 && currentTop > topMin + 1) {
+            const topReduction = Math.min(currentTop - topMin, extraIncrease);
+            nextTop = Math.max(topMin, currentTop - topReduction);
+            targetExtra = currentExtra + topReduction;
+        }
+        promptLoraSplitManual = true;
+        holdPromptSplitFit();
+        setResizeTargetHeight(topRow, topRowHeightKey, nextTop, {
+            min: topMin,
+            max: topRow.__webuiBridgeMaxHeight,
+        });
+        setResizeTargetHeight(extraSection, extraHeightKey, targetExtra, {
+            min: getExtraVisibleFloor(),
+            max: getExtraResizeMaxHeight(),
+        });
+        extraSection.style.flex = "0 0 auto";
+        return true;
+    };
     const seedFreshInitialLayout = () => {
         if (!freshInitialLayoutPending() || node.__webuiBridgeFreshInitialLayoutSeeded) return;
         node.__webuiBridgeFreshInitialLayoutSeeded = true;
@@ -12719,7 +13382,10 @@ function buildPanel(node) {
     };
     function visibleStackContentHeight(container) {
         if (!container?.isConnected || resizeTargetHidden(container)) return 0;
-        const children = [...container.children].filter((child) => !resizeTargetHidden(child));
+        const children = [...container.children].filter((child) => (
+            !resizeTargetHidden(child) &&
+            child?.dataset?.layoutComfort !== "false"
+        ));
         if (!children.length) return 0;
         const style = getComputedStyle(container);
         const gap = Number.parseFloat(style.rowGap || style.gap) || 0;
@@ -13008,8 +13674,9 @@ function buildPanel(node) {
         };
     };
 
-    panel.__webuiBridgeHandlePromptCollapseChange = () => {
+    panel.__webuiBridgeHandlePromptCollapseChange = (detail = {}) => {
         markGraphChanged(node);
+        if (detail.collapsed) reclaimLoraSpaceAfterNegativeCollapse(detail.before);
         scheduleAdaptiveLayout();
         window.requestAnimationFrame?.(() => ensureUsableExtraHeight());
         scheduleManualResizeSettle();
@@ -13134,6 +13801,7 @@ function buildPanel(node) {
                 adaptiveLayoutScheduled = false;
                 if (!panelLayoutIsMeasurable()) return;
                 ensurePanelSplitterVisible();
+                reclaimLoraSpaceAfterNegativeCollapse();
                 fitPromptColumnToContent();
                 ensurePanelSplitterVisible();
                 const activePreset = state.settings?.layout_preset || "default";
@@ -15093,6 +15761,96 @@ function addStyles() {
             height: 14px;
             margin: 0;
             accent-color: #2f73d9;
+        }
+        .webui-bridge-generation-section {
+            border: 1px solid #3e4654;
+            border-radius: 5px;
+            background: #171a20;
+            color: #cbd4e1;
+            font-size: 11px;
+        }
+        .webui-bridge-generation-section summary {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 6px;
+            cursor: pointer;
+            font-weight: 700;
+        }
+        .webui-bridge-generation-status {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: #9fb0c7;
+            font-weight: 500;
+        }
+        .webui-bridge-generation-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) minmax(70px, 0.7fr);
+            gap: 5px;
+            padding: 0 6px 6px;
+        }
+        .webui-bridge-generation-field,
+        .webui-bridge-generation-toggle {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            min-width: 0;
+        }
+        .webui-bridge-generation-field span,
+        .webui-bridge-generation-toggle span {
+            flex: 0 0 auto;
+        }
+        .webui-bridge-generation-toggle input[type="checkbox"] {
+            width: 14px;
+            height: 14px;
+            margin: 0;
+            accent-color: #2f73d9;
+        }
+        .webui-bridge-generation-input {
+            min-width: 0;
+            width: 100%;
+            height: 24px;
+            padding: 2px 5px;
+            box-sizing: border-box;
+            border: 1px solid #4d5666;
+            border-radius: 4px;
+            background: #111318;
+            color: #f2f4f8;
+            font-size: 11px;
+        }
+        .webui-bridge-generation-input:disabled {
+            opacity: 0.55;
+        }
+        .webui-bridge-generation-seed {
+            width: 100%;
+        }
+        .webui-bridge-generation-seed-field,
+        .webui-bridge-generation-wide-field,
+        .webui-bridge-generation-button.primary {
+            grid-column: 1 / -1;
+        }
+        .webui-bridge-generation-button {
+            min-width: 0;
+            height: 24px;
+            padding: 0 8px;
+            border: 1px solid #4d5666;
+            border-radius: 4px;
+            background: #243044;
+            color: #e8edf7;
+            cursor: pointer;
+            font-weight: 700;
+            font-size: 11px;
+        }
+        .webui-bridge-generation-button.primary {
+            background: #245c9e;
+            border-color: #2f73d9;
+            color: #fff;
+        }
+        .webui-bridge-generation-button:hover {
+            filter: brightness(1.08);
         }
         .webui-bridge-regional-section {
             border: 1px solid #3e4654;
