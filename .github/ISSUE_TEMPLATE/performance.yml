@@ -10,7 +10,7 @@ body:
     id: version
     attributes:
       label: Bridge / ComfyUI / 浏览器版本
-      placeholder: v0.4.27 / ComfyUI SHA / Chrome 140
+      placeholder: v0.4.28 / ComfyUI SHA / Chrome 140
     validations:
       required: true
   - type: textarea

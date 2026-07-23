@@ -1766,13 +1766,17 @@ async function verifyExactPromptTagToggle(browser, baseUrl) {
     }
 }
 
-async function verifyUnlimitedFavoriteListDeletion(browser, baseUrl) {
+async function verifyFavoritePaginationAndBatchOperations(browser, baseUrl) {
     const consoleMessages = [];
-    let favorites = Array.from({ length: 300 }, (_, index) => ({
+    const storageActions = [];
+    let pushedFavoriteItems = [];
+    let favorites = Array.from({ length: 2000 }, (_, index) => ({
         id: `favorite-${index}`,
         name: `Favorite ${index}`,
         prompt: `favorite_tag_${index}`,
         tags: [{ prompt: `favorite_tag_${index}`, local: `Favorite ${index}` }],
+        category: index < 1000 ? "A" : "B",
+        subCategory: "默认",
     }));
     const { context, page } = await newComfyPage(browser, baseUrl, consoleMessages, { width: 1200, height: 900 }, async (newPage) => {
         await newPage.route("**/webui_prompt_bridge/prompt_all_in_one?lang=zh_CN", async (route) => {
@@ -1787,8 +1791,21 @@ async function verifyUnlimitedFavoriteListDeletion(browser, baseUrl) {
         });
         await newPage.route("**/webui_prompt_bridge/prompt_all_in_one/storage", async (route) => {
             const data = route.request().postDataJSON();
+            storageActions.push(data.action);
             if (data.action === "delete_favorite") {
                 favorites = favorites.filter((item) => item.id !== data.id);
+            } else if (data.action === "push_favorites") {
+                pushedFavoriteItems = data.items || [];
+                favorites = favorites.concat(pushedFavoriteItems.map((item, index) => ({
+                    ...item,
+                    id: `batch-${index}`,
+                    tags: [{ prompt: item.prompt, local: item.name }],
+                })));
+            } else if (data.action === "rename_favorite_category") {
+                favorites = favorites.map((item) => ({
+                    ...item,
+                    category: (item.category || "新增提示词") === data.fromCategory ? data.category : item.category,
+                }));
             }
             await route.fulfill({
                 status: 200,
@@ -1803,6 +1820,8 @@ async function verifyUnlimitedFavoriteListDeletion(browser, baseUrl) {
     try {
         await page.evaluate(() => {
             window.confirm = () => true;
+            window.prompt = () => "收藏重命名";
+            localStorage.setItem("webui-bridge-favorite-categories-positive", "{broken-json");
             window.app.graph.clear();
             const bridge = window.LiteGraph.createNode("WebUIPromptBridge");
             bridge.id = 950022;
@@ -1812,24 +1831,108 @@ async function verifyUnlimitedFavoriteListDeletion(browser, baseUrl) {
         });
         await page.waitForFunction(() => document.querySelector(".webui-bridge-panel")?.__webuiBridgeDataLoaded, null, { timeout: 30000 });
         const positivePanel = page.locator(".webui-bridge-aio-positive");
-        await positivePanel.locator(".webui-bridge-aio-tabs button", { hasText: "收藏列表" }).click();
+        await positivePanel.locator(".webui-bridge-aio-tabs .webui-bridge-tab-favorite").first().click();
         const favoriteTags = positivePanel.locator(".webui-bridge-aio-tag");
-        await favoriteTags.nth(299).waitFor({ state: "visible", timeout: 20000 });
+        await favoriteTags.nth(99).waitFor({ state: "visible", timeout: 20000 });
         const before = await favoriteTags.count();
-        const target = positivePanel.locator('.webui-bridge-aio-tag[data-prompt="favorite_tag_280"]');
+        const pageInfo = await positivePanel.locator(".webui-bridge-aio-page-info").textContent();
+        assert(before === 100, "Favorite pagination rendered more than 100 cards", { before, pageInfo });
+        assert(pageInfo.includes("1000"), "Favorite pagination did not show the active category count", { pageInfo });
+        await positivePanel.locator(".webui-bridge-aio-page-next").click();
+        await positivePanel.locator('.webui-bridge-aio-tag[data-prompt="favorite_tag_100"]').waitFor({ state: "visible" });
+        const search = positivePanel.locator(".webui-bridge-aio-new");
+        await search.fill("favorite_tag_1980");
+        const target = positivePanel.locator('.webui-bridge-aio-tag[data-prompt="favorite_tag_1980"]');
+        await target.waitFor({ state: "visible", timeout: 20000 });
         const removeOpacity = await target.locator(".webui-bridge-aio-fav-remove").evaluate((element) => getComputedStyle(element).opacity);
         await target.locator(".webui-bridge-aio-fav-remove").click();
-        await page.waitForFunction(() => !document.querySelector('.webui-bridge-aio-positive .webui-bridge-aio-tag[data-prompt="favorite_tag_280"]'));
+        await page.waitForFunction(() => !document.querySelector('.webui-bridge-aio-positive .webui-bridge-aio-tag[data-prompt="favorite_tag_1980"]'));
         const after = await favoriteTags.count();
-        assert(before === 300, "Favorite list still has a frontend rendering cap", { before });
         assert(Number(removeOpacity) > 0, "Favorite removal control is hidden until hover", { removeOpacity });
-        assert(after === 299, "Favorite deletion did not immediately rebuild the list", { before, after });
+        assert(after === 0, "Favorite deletion did not refresh the filtered result", { before, after });
+        await search.fill("");
+        await favoriteTags.nth(99).waitFor({ state: "visible", timeout: 20000 });
+        const afterClear = await favoriteTags.count();
+        assert(afterClear === 100, "Clearing favorite search did not reset and clamp pagination", { afterClear });
+        const performanceReport = await page.evaluate(() => {
+            const panel = document.querySelector(".webui-bridge-aio-positive");
+            const textarea = document.querySelector(".webui-bridge-positive-prompt-row textarea");
+            const chips = document.querySelector(".webui-bridge-positive-prompt-row .webui-bridge-prompt-chips");
+            const negativeTextarea = document.querySelector(".webui-bridge-prompt-row:not(.webui-bridge-positive-prompt-row) textarea");
+            const negativeChips = document.querySelector(".webui-bridge-prompt-row:not(.webui-bridge-positive-prompt-row) .webui-bridge-prompt-chips");
+            const values = Array.from({ length: 120 }, (_, index) => `performance_tag_${String(index).padStart(3, "0")}`);
+            negativeTextarea.value = "bad anatomy, blurry";
+            negativeTextarea.dispatchEvent(new Event("input", { bubbles: true }));
+            textarea.value = values.join(", ");
+            textarea.dispatchEvent(new Event("input", { bubbles: true }));
+            const firstFavoriteCard = panel.querySelector(".webui-bridge-aio-tag");
+            const firstNegativeChip = negativeChips.querySelector(".webui-bridge-prompt-chip[data-prompt-index]");
+            const durations = [];
+            for (let index = 0; index < 5; index += 1) {
+                const chip = chips.querySelector('[data-prompt-index="60"]');
+                const moveButtons = chip?.querySelectorAll(".webui-bridge-chip-move-tool") || [];
+                const started = performance.now();
+                moveButtons[index % 2]?.click();
+                durations.push(performance.now() - started);
+            }
+            const sorted = [...durations].sort((left, right) => left - right);
+            return {
+                durations,
+                median: sorted[Math.floor(sorted.length / 2)],
+                favoriteDomStable: firstFavoriteCard === panel.querySelector(".webui-bridge-aio-tag"),
+                negativeDomStable: firstNegativeChip === negativeChips.querySelector(".webui-bridge-prompt-chip[data-prompt-index]"),
+                chipCount: chips.querySelectorAll(".webui-bridge-prompt-chip[data-prompt-index]").length,
+            };
+        });
+        assert(performanceReport.chipCount === 120, "Performance fixture did not render 120 Prompt tags", performanceReport);
+        assert(performanceReport.median <= 250, "Five Prompt reorders exceeded the 250 ms median budget", performanceReport);
+        assert(performanceReport.favoriteDomStable, "Prompt reorder rebuilt the favorite card DOM", performanceReport);
+        assert(performanceReport.negativeDomStable, "Positive Prompt reorder rebuilt the negative Prompt chips", performanceReport);
+        const batchRequest = page.waitForRequest((request) => {
+            if (!request.url().includes("/webui_prompt_bridge/prompt_all_in_one/storage")) return false;
+            try { return request.postDataJSON()?.action === "push_favorites"; } catch { return false; }
+        });
+        const dragCleanupBeforeResponse = await page.evaluate(() => {
+            const textarea = document.querySelector(".webui-bridge-positive-prompt-row textarea");
+            const chips = document.querySelector(".webui-bridge-positive-prompt-row .webui-bridge-prompt-chips");
+            const targetTab = document.querySelector(".webui-bridge-aio-positive .webui-bridge-tab-favorite");
+            textarea.value = "girl, solo";
+            textarea.dispatchEvent(new Event("input", { bubbles: true }));
+            chips.querySelector('[data-prompt-index="0"]')?.dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true }));
+            chips.querySelector('[data-prompt-index="1"]')?.dispatchEvent(new MouseEvent("click", { bubbles: true, ctrlKey: true }));
+            const source = chips.querySelector('[data-prompt-index="0"]');
+            const transfer = new DataTransfer();
+            source.dispatchEvent(new DragEvent("dragstart", { bubbles: true, dataTransfer: transfer }));
+            targetTab.dispatchEvent(new DragEvent("dragover", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+            targetTab.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+            source.dispatchEvent(new DragEvent("dragend", { bubbles: true, dataTransfer: transfer }));
+            return {
+                dragging: document.querySelectorAll(".webui-bridge-aio-tag.dragging, .webui-bridge-prompt-chip.dragging").length,
+                dropTargets: document.querySelectorAll(".webui-bridge-aio-body.drop-target, .webui-bridge-aio-tabs .drop-target").length,
+            };
+        });
+        await batchRequest;
+        await page.waitForTimeout(100);
+        assert(storageActions.filter((action) => action === "push_favorites").length === 1,
+            "Multi-select Prompt drag did not use one batch request", { storageActions, pushedFavoriteItems });
+        assert(pushedFavoriteItems.length === 2 && new Set(pushedFavoriteItems.map((item) => item.name)).size === 2,
+            "Multi-select Prompt drag reused one translation for every favorite", { pushedFavoriteItems });
+        assert(dragCleanupBeforeResponse.dragging === 0 && dragCleanupBeforeResponse.dropTargets === 0,
+            "Favorite dragend left global drag styling behind", dragCleanupBeforeResponse);
+        const favoriteTab = positivePanel.locator(".webui-bridge-aio-tabs .webui-bridge-tab-favorite").first();
+        await favoriteTab.hover();
+        await page.locator(".webui-bridge-tab-popup-item", { hasText: "重命名" }).click();
+        await positivePanel.locator(".webui-bridge-aio-tabs .webui-bridge-tab-favorite", { hasText: "收藏重命名" }).waitFor({ state: "visible" });
+        assert(storageActions.filter((action) => action === "rename_favorite_category").length === 1,
+            "Favorite category rename did not use one batch request", { storageActions });
+        const repairedStorage = await page.evaluate(() => localStorage.getItem("webui-bridge-favorite-categories-positive"));
+        assert(repairedStorage !== "{broken-json", "Corrupt favorite category cache was not recovered", { repairedStorage });
         const bridgeConsoleErrors = consoleMessages.filter((message) =>
             ["error", "pageerror"].includes(message.type) &&
             /WebUI Prompt Bridge|WebUIPromptBridge|webui_prompt_bridge/i.test(message.text)
         );
         assert(!bridgeConsoleErrors.length, "Favorite list deletion emitted console errors", bridgeConsoleErrors);
-        return { before, after, removeOpacity, bridgeConsoleErrors: bridgeConsoleErrors.length };
+        return { before, after, afterClear, pageInfo, removeOpacity, performanceReport, pushedFavoriteItems, storageActions, repairedStorage, bridgeConsoleErrors: bridgeConsoleErrors.length };
     } finally {
         await context.close();
     }
@@ -1877,7 +1980,15 @@ async function verifySplitUnetSelectionIsTopologySafe(browser, baseUrl) {
             return { unetId: unet.id, bridgeId: bridge.id };
         }, modelNames);
         assert(!setup.error, "Unable to construct split UNET verification graph", setup);
-        await page.waitForFunction(() => document.querySelector(".webui-bridge-panel")?.__webuiBridgeDataLoaded, null, { timeout: 30000 });
+        await page.waitForFunction(() => [...document.querySelectorAll(".webui-bridge-panel")].at(-1)?.__webuiBridgeDataLoaded, null, { timeout: 30000 });
+        await page.waitForFunction((target) => {
+            const select = [...document.querySelectorAll(".webui-bridge-model-select")].at(-1);
+            const options = [...(select?.options || [])];
+            const groups = [...(select?.querySelectorAll("optgroup") || [])].map((group) => group.label);
+            return options.some((option) => option.dataset.modelKind === "unet" && option.dataset.modelName === target)
+                && groups.includes("分体 UNET（diffusion_models）")
+                && groups.includes("整合 Checkpoint");
+        }, modelNames[1], { timeout: 30000 });
         const before = await page.evaluate(({ unetId, target, names }) => {
             const panel = [...document.querySelectorAll(".webui-bridge-panel")].at(-1);
             const select = panel?.querySelector(".webui-bridge-model-select");
@@ -4310,7 +4421,7 @@ async function main() {
             fullPromptLibraryAndBulkClear: await verifyFullPromptLibraryAndBulkClear(browser, options.baseUrl),
             maskEditorLoadGuardsAndCanvasBudget: await verifyMaskEditorLoadGuardsAndCanvasBudget(browser, options.baseUrl),
             compactSidebarTabsAndLowZoomSummary: await verifyCompactSidebarTabsAndLowZoomSummary(browser, options.baseUrl),
-            unlimitedFavoriteListDeletion: await verifyUnlimitedFavoriteListDeletion(browser, options.baseUrl),
+            favoritePaginationAndBatchOperations: await verifyFavoritePaginationAndBatchOperations(browser, options.baseUrl),
             splitUnetSelectionIsTopologySafe: await verifySplitUnetSelectionIsTopologySafe(browser, options.baseUrl),
             imagePromptImportRequiresConfirmation: await verifyImagePromptImportRequiresConfirmation(browser, options.baseUrl),
             wrappedPromptPositionEditing: await verifyWrappedPromptPositionEditing(browser, options.baseUrl),
@@ -4330,7 +4441,7 @@ async function main() {
             maskEditorLoadGuardsAndCanvasBudget: await verifyMaskEditorLoadGuardsAndCanvasBudget(browser, options.baseUrl),
             compactSidebarTabsAndLowZoomSummary: await verifyCompactSidebarTabsAndLowZoomSummary(browser, options.baseUrl),
             exactPromptTagToggle: await verifyExactPromptTagToggle(browser, options.baseUrl),
-            unlimitedFavoriteListDeletion: await verifyUnlimitedFavoriteListDeletion(browser, options.baseUrl),
+            favoritePaginationAndBatchOperations: await verifyFavoritePaginationAndBatchOperations(browser, options.baseUrl),
             splitUnetSelectionIsTopologySafe: await verifySplitUnetSelectionIsTopologySafe(browser, options.baseUrl),
             imagePromptImportRequiresConfirmation: await verifyImagePromptImportRequiresConfirmation(browser, options.baseUrl),
             wrappedPromptPositionEditing: await verifyWrappedPromptPositionEditing(browser, options.baseUrl),

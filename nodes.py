@@ -48,6 +48,7 @@ MAX_IMAGE_FRAME_PIXELS = 40_000_000
 MAX_IMAGE_TOTAL_PIXELS = 80_000_000
 MAX_IMAGE_FRAMES = 32
 MAX_AI_RESPONSE_BYTES = 4 * 1024 * 1024
+MAX_FAVORITE_BATCH_ITEMS = 5000
 DEFAULT_ZOOM_SUMMARY_THRESHOLD = 0.5
 MIN_ZOOM_SUMMARY_THRESHOLD = 0.0
 MAX_ZOOM_SUMMARY_THRESHOLD = 1.0
@@ -1033,11 +1034,23 @@ def _looks_like_webui_root(root):
     return root.is_dir() and (root / "models").is_dir() and ((root / "webui.py").exists() or (root / "launch.py").exists() or (root / "modules").is_dir())
 
 
+def _webui_root_from_candidate(value):
+    path = _existing_path(value)
+    if not path:
+        return None
+    candidates = [path]
+    candidates.extend(list(path.parents)[:4])
+    for candidate in candidates:
+        if _looks_like_webui_root(candidate):
+            return candidate
+    return None
+
+
 def _build_webui_config(webui_root):
     root_text = _truncate_text(webui_root, MAX_WEBUI_ROOT_LENGTH)
-    root = _existing_path(root_text)
-    if not root or not _looks_like_webui_root(root):
-        raise ValueError("WebUI 根目录不存在或结构不完整，请选择包含 models 且带 webui.py、launch.py 或 modules 的 WebUI 根目录")
+    root = _webui_root_from_candidate(root_text)
+    if not root:
+        raise ValueError("WebUI 目录不存在或结构不完整；可选择 WebUI 根目录，也可直接选择 models/Lora 目录")
     extensions = root / "extensions"
     detected = _detect_webui_paths(root)
     model_paths = {
@@ -1243,7 +1256,7 @@ def _apply_local_config(config):
 
 
 def _webui_integration_status(webui_root=None):
-    root = _existing_path(webui_root) or WEBUI_ROOT
+    root = _webui_root_from_candidate(webui_root) or WEBUI_ROOT
     config = {}
     error = ""
     if root:
@@ -1276,6 +1289,7 @@ _WEBUI_ROOT_DIR_NAMES = (
     "stable-diffusion-webui",
     "sd-webui",
 )
+_WEBUI_SEARCH_RELATIVE_BASES = ("", "AI", "AI/Tools", "Tools")
 
 
 def _local_drive_letters():
@@ -1313,6 +1327,19 @@ def _dedupe_root_texts(values):
     return result
 
 
+def _webui_candidates_under(drive_root):
+    candidates = []
+    for relative in _WEBUI_SEARCH_RELATIVE_BASES:
+        base = drive_root / Path(relative) if relative else drive_root
+        for name in _WEBUI_ROOT_DIR_NAMES:
+            candidates.append(base / name)
+        try:
+            candidates.extend(base.glob("sd-webui-aki*"))
+        except Exception:
+            pass
+    return candidates
+
+
 def _guess_webui_roots(preferred=None, use_cache=True):
     now = time.monotonic()
     preferred_values = _dedupe_root_texts([preferred])
@@ -1321,8 +1348,8 @@ def _guess_webui_roots(preferred=None, use_cache=True):
     if use_cache and preferred_values and now - float(_WEBUI_ROOT_GUESS_CACHE.get("time") or 0) < _WEBUI_ROOT_GUESS_TTL:
         preferred_found = []
         for value in preferred_values:
-            path = _existing_path(value)
-            if path and ((path / "webui.py").exists() or (path / "launch.py").exists() or (path / "models").exists()):
+            path = _webui_root_from_candidate(value)
+            if path:
                 preferred_found.append(_path_text(path))
         return _dedupe_root_texts([*preferred_found, *(_WEBUI_ROOT_GUESS_CACHE.get("roots") or [])])[:12]
     candidates = []
@@ -1342,24 +1369,17 @@ def _guess_webui_roots(preferred=None, use_cache=True):
         if value:
             candidates.append(value)
     for drive in _local_drive_letters():
-        for name in _WEBUI_ROOT_DIR_NAMES:
-            candidates.append(f"{drive}:/{name}")
         drive_root = Path(f"{drive}:/")
-        try:
-            for child in drive_root.glob("sd-webui-aki*"):
-                candidates.append(child)
-        except Exception:
-            pass
+        candidates.extend(_webui_candidates_under(drive_root))
     seen = set()
     found = []
     for candidate in _dedupe_root_texts(candidates):
-        path = _existing_path(candidate)
+        path = _webui_root_from_candidate(candidate)
         key = _path_text(path).lower() if path else ""
         if not path or key in seen:
             continue
-        if (path / "webui.py").exists() or (path / "launch.py").exists() or (path / "models").exists():
-            seen.add(key)
-            found.append(_path_text(path))
+        seen.add(key)
+        found.append(_path_text(path))
     found = found[:12]
     if use_cache and not preferred_values:
         _WEBUI_ROOT_GUESS_CACHE["time"] = now
@@ -1993,8 +2013,7 @@ def _prompt_all_in_one_item_id(item, index):
     return f"legacy-{digest[:16]}"
 
 
-def _load_prompt_all_in_one_favorites(kind):
-    data = _storage_get(_storage_key("favorite", kind), [])
+def _serialize_prompt_all_in_one_favorites(data):
     items = []
     for index, item in enumerate(data if isinstance(data, list) else []):
         if not isinstance(item, dict):
@@ -2017,6 +2036,12 @@ def _load_prompt_all_in_one_favorites(kind):
                 "subCategory": item.get("subCategory") or "",
             })
     return items
+
+
+def _load_prompt_all_in_one_favorites(kind):
+    return _serialize_prompt_all_in_one_favorites(
+        _storage_get(_storage_key("favorite", kind), [])
+    )
 
 
 def _storage_key(collection, kind):
@@ -2229,36 +2254,223 @@ def _make_prompt_item(prompt, name="", lang="zh_CN", category="", sub_category="
     }
 
 
+def _favorite_category_value(item):
+    value = item.get("category") if isinstance(item, dict) else ""
+    return str(value or "").strip() or "新增提示词"
+
+
+def _favorite_sub_category_value(item):
+    value = item.get("subCategory") if isinstance(item, dict) else ""
+    return str(value or "").strip() or "未分类"
+
+
+def _mutate_prompt_all_in_one_favorites(
+    kind,
+    operation,
+    *,
+    entries=None,
+    item_ids=None,
+    prompt="",
+    name=None,
+    category=None,
+    sub_category=None,
+    source_category=None,
+    source_sub_category=None,
+    lang="zh_CN",
+):
+    """Apply one favorite transaction with at most one read and one write."""
+    key = _storage_key("favorite", kind)
+    stored = _storage_get(key, [])
+    if not isinstance(stored, list):
+        stored = []
+    items = [dict(item) if isinstance(item, dict) else item for item in stored]
+    changed = 0
+    last_item = None
+    raw_item_ids = item_ids if isinstance(item_ids, (list, tuple, set)) else []
+    requested_ids = {
+        str(value or "").strip()
+        for value in list(raw_item_ids)[:MAX_FAVORITE_BATCH_ITEMS]
+        if str(value or "").strip()
+    }
+
+    if operation == "push":
+        normalized_entries = list(entries)[:MAX_FAVORITE_BATCH_ITEMS] if isinstance(entries, (list, tuple)) else []
+        existing_keys = {
+            (
+                _prompt_all_in_one_item_prompt(item).strip(),
+                _favorite_category_value(item),
+                _favorite_sub_category_value(item),
+            )
+            for item in items
+            if isinstance(item, dict)
+        }
+        for entry in normalized_entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_prompt = _truncate_text(entry.get("prompt", ""), MAX_PROMPT_TEXT_LENGTH).strip()
+            if not entry_prompt:
+                continue
+            entry_name = _truncate_text(entry.get("name", ""), MAX_STYLE_NAME_LENGTH)
+            entry_category = _truncate_text(entry.get("category", ""), MAX_STYLE_NAME_LENGTH).strip()
+            entry_sub_category = _truncate_text(entry.get("subCategory", ""), MAX_STYLE_NAME_LENGTH).strip()
+            identity = (
+                entry_prompt,
+                entry_category or "新增提示词",
+                entry_sub_category or "未分类",
+            )
+            if identity in existing_keys:
+                continue
+            last_item = _make_prompt_item(
+                entry_prompt,
+                entry_name,
+                lang,
+                entry_category,
+                entry_sub_category,
+            )
+            items.append(last_item)
+            existing_keys.add(identity)
+            changed += 1
+
+    elif operation == "update":
+        for index, item in enumerate(items):
+            if not isinstance(item, dict) or _prompt_all_in_one_item_id(item, index) not in requested_ids:
+                continue
+            item_changed = False
+            if name is not None and item.get("name") != name:
+                item["name"] = name
+                item_changed = True
+            if category is not None and item.get("category", "") != category:
+                item["category"] = category
+                item_changed = True
+            if sub_category is not None and item.get("subCategory", "") != sub_category:
+                item["subCategory"] = sub_category
+                item_changed = True
+            if item_changed:
+                changed += 1
+
+    elif operation == "rename_category":
+        source = str(source_category or "").strip() or "新增提示词"
+        target = str(category or "").strip()
+        if target:
+            for item in items:
+                if isinstance(item, dict) and _favorite_category_value(item) == source and item.get("category", "") != target:
+                    item["category"] = target
+                    changed += 1
+
+    elif operation == "rename_sub_category":
+        parent = str(source_category or category or "").strip() or "新增提示词"
+        source = str(source_sub_category or "").strip() or "未分类"
+        target = str(sub_category or "").strip()
+        if target:
+            for item in items:
+                if (
+                    isinstance(item, dict)
+                    and _favorite_category_value(item) == parent
+                    and _favorite_sub_category_value(item) == source
+                    and item.get("subCategory", "") != target
+                ):
+                    item["subCategory"] = target
+                    changed += 1
+
+    elif operation in {"delete", "delete_category", "delete_sub_category"}:
+        remove_indexes = set()
+        if operation == "delete":
+            if requested_ids:
+                remove_indexes = {
+                    index
+                    for index, item in enumerate(items)
+                    if isinstance(item, dict) and _prompt_all_in_one_item_id(item, index) in requested_ids
+                }
+            else:
+                target_prompt = str(prompt or "").strip()
+                matches = [
+                    index
+                    for index, item in enumerate(items)
+                    if isinstance(item, dict) and _prompt_all_in_one_item_prompt(item).strip() == target_prompt
+                ]
+                if len(matches) == 1:
+                    remove_indexes.add(matches[0])
+        elif operation == "delete_category":
+            source = str(source_category or category or "").strip() or "新增提示词"
+            remove_indexes = {
+                index
+                for index, item in enumerate(items)
+                if isinstance(item, dict) and _favorite_category_value(item) == source
+            }
+        else:
+            parent = str(source_category or category or "").strip() or "新增提示词"
+            source = str(source_sub_category or sub_category or "").strip() or "未分类"
+            remove_indexes = {
+                index
+                for index, item in enumerate(items)
+                if (
+                    isinstance(item, dict)
+                    and _favorite_category_value(item) == parent
+                    and _favorite_sub_category_value(item) == source
+                )
+            }
+        if remove_indexes:
+            items = [item for index, item in enumerate(items) if index not in remove_indexes]
+            changed = len(remove_indexes)
+
+    else:
+        raise ValueError("Unknown favorite operation")
+
+    if changed:
+        _storage_set(key, items)
+    return {
+        "success": True,
+        "changed": changed,
+        "item": last_item,
+        "items": items,
+    }
+
+
+def _favorite_collections_payload(kind, current_items):
+    current = _serialize_prompt_all_in_one_favorites(current_items)
+    other_kind = "positive" if kind == "negative" else "negative"
+    other = _load_prompt_all_in_one_favorites(other_kind)
+    return {
+        kind: current,
+        other_kind: other,
+    }
+
+
 def _push_prompt_all_in_one_item(collection, kind, prompt, name="", lang="zh_CN", category="", sub_category=""):
+    if collection == "favorite":
+        result = _mutate_prompt_all_in_one_favorites(
+            kind,
+            "push",
+            entries=[{
+                "prompt": prompt,
+                "name": name,
+                "category": category,
+                "subCategory": sub_category,
+            }],
+            lang=lang,
+        )
+        return result["item"]
     key = _storage_key(collection, kind)
     items = _storage_get(key, [])
     if not isinstance(items, list):
         items = []
     if collection == "history" and len(items) >= PROMPT_ALL_IN_ONE_HISTORY_MAX:
         items = items[-(PROMPT_ALL_IN_ONE_HISTORY_MAX - 1):]
-    # 收藏去重：同一 category + sub_category 下 prompt 相同时跳过（空值等同于默认值）
-    item_prompt = str(prompt or "").strip()
-    item_category = str(category or "").strip() or "新增提示词"
-    item_sub_category = str(sub_category or "").strip() or "未分类"
-    skip = False
-    if collection == "favorite":
-        for existing in items:
-            existing_prompt = str(existing.get("prompt") or "").strip()
-            existing_cat = str(existing.get("category") or "").strip() or "新增提示词"
-            existing_sub = str(existing.get("subCategory") or "").strip() or "未分类"
-            if existing_prompt == item_prompt and existing_cat == item_category and existing_sub == item_sub_category:
-                skip = True
-                break
-    if not skip:
-        item = _make_prompt_item(prompt, name, lang, category, sub_category)
-        items.append(item)
-        _storage_set(key, items)
-    else:
-        item = None
+    item = _make_prompt_item(prompt, name, lang, category, sub_category)
+    items.append(item)
+    _storage_set(key, items)
     return item
 
 
 def _delete_prompt_all_in_one_item(collection, kind, item_id="", prompt=""):
+    if collection == "favorite":
+        result = _mutate_prompt_all_in_one_favorites(
+            kind,
+            "delete",
+            item_ids=[item_id] if item_id else [],
+            prompt=prompt,
+        )
+        return bool(result["changed"])
     key = _storage_key(collection, kind)
     items = _storage_get(key, [])
     if not isinstance(items, list):
@@ -2287,27 +2499,15 @@ def _delete_prompt_all_in_one_item(collection, kind, item_id="", prompt=""):
 
 
 def _update_prompt_all_in_one_favorite(kind, item_id, name="", category="", sub_category=""):
-    key = _storage_key("favorite", kind)
-    items = _storage_get(key, [])
-    if not isinstance(items, list):
-        return False
-    item_id = str(item_id or "")
-    if not item_id:
-        return False
-    updated = False
-    for index, item in enumerate(items):
-        if _prompt_all_in_one_item_id(item, index) == item_id:
-            if name is not None and name != "":
-                item["name"] = name
-            if category is not None and category != "":
-                item["category"] = category
-            if sub_category is not None and sub_category != "":
-                item["subCategory"] = sub_category
-            updated = True
-            break
-    if updated:
-        _storage_set(key, items)
-    return updated
+    result = _mutate_prompt_all_in_one_favorites(
+        kind,
+        "update",
+        item_ids=[item_id] if item_id else [],
+        name=name if name not in (None, "") else None,
+        category=category if category not in (None, "") else None,
+        sub_category=sub_category if sub_category not in (None, "") else None,
+    )
+    return bool(result["changed"])
 
 
 def _get_prompt_all_in_one_items(collection, kind):
@@ -6804,8 +7004,8 @@ def _register_routes():
             return rejected
         data = await request.json()
         root = _truncate_text(data.get("webui_root") or data.get("root") or "", MAX_WEBUI_ROOT_LENGTH)
-        if not root and data.get("auto_detect"):
-            guesses = _guess_webui_roots()
+        if data.get("auto_detect"):
+            guesses = _guess_webui_roots(root, use_cache=False)
             root = guesses[0] if guesses else ""
         if not root:
             return web.json_response({
@@ -6816,6 +7016,7 @@ def _register_routes():
         try:
             config = dict(LOCAL_CONFIG)
             config.update(_build_webui_config(root))
+            root = config["webui_root"]
             settings = dict(_bridge_settings())
             settings["data_source"] = "auto"
             settings["show_startup_wizard"] = False
@@ -7130,37 +7331,104 @@ def _register_routes():
         category = _truncate_text(data.get("category", ""), MAX_STYLE_NAME_LENGTH)
         sub_category = _truncate_text(data.get("subCategory", ""), MAX_STYLE_NAME_LENGTH)
 
+        def favorite_response(result, *, require_change=False):
+            return web.json_response({
+                "success": bool(result.get("changed")) if require_change else True,
+                "changed": int(result.get("changed") or 0),
+                "item": result.get("item"),
+                "favorites": _favorite_collections_payload(kind, result.get("items") or []),
+            })
+
         if action == "push_history":
             item = _push_prompt_all_in_one_item("history", kind, prompt, name, lang)
             return web.json_response({"success": True, "item": item})
         if action == "push_favorite":
-            item = _push_prompt_all_in_one_item("favorite", kind, prompt, name, lang, category, sub_category)
-            return web.json_response({
-                "success": True,
-                "item": item,
-                "favorites": {
-                    "positive": _load_prompt_all_in_one_favorites("positive"),
-                    "negative": _load_prompt_all_in_one_favorites("negative"),
-                },
-            })
+            result = _mutate_prompt_all_in_one_favorites(
+                kind,
+                "push",
+                entries=[{
+                    "prompt": prompt,
+                    "name": name,
+                    "category": category,
+                    "subCategory": sub_category,
+                }],
+                lang=lang,
+            )
+            return favorite_response(result)
+        if action == "push_favorites":
+            result = _mutate_prompt_all_in_one_favorites(
+                kind,
+                "push",
+                entries=data.get("items") if isinstance(data.get("items"), list) else [],
+                lang=lang,
+            )
+            return favorite_response(result)
         if action == "update_favorite":
-            updated = _update_prompt_all_in_one_favorite(kind, item_id, name, category, sub_category)
-            return web.json_response({
-                "success": updated,
-                "favorites": {
-                    "positive": _load_prompt_all_in_one_favorites("positive"),
-                    "negative": _load_prompt_all_in_one_favorites("negative"),
-                },
-            })
+            result = _mutate_prompt_all_in_one_favorites(
+                kind,
+                "update",
+                item_ids=[item_id] if item_id else [],
+                name=name if name else None,
+                category=category if category else None,
+                sub_category=sub_category if sub_category else None,
+            )
+            return favorite_response(result, require_change=True)
+        if action == "move_favorites":
+            result = _mutate_prompt_all_in_one_favorites(
+                kind,
+                "update",
+                item_ids=data.get("ids") if isinstance(data.get("ids"), list) else [],
+                category=category if "category" in data else None,
+                sub_category=sub_category if "subCategory" in data else None,
+            )
+            return favorite_response(result)
+        if action == "rename_favorite_category":
+            result = _mutate_prompt_all_in_one_favorites(
+                kind,
+                "rename_category",
+                source_category=_truncate_text(data.get("fromCategory", ""), MAX_STYLE_NAME_LENGTH),
+                category=category,
+            )
+            return favorite_response(result)
+        if action == "rename_favorite_subcategory":
+            result = _mutate_prompt_all_in_one_favorites(
+                kind,
+                "rename_sub_category",
+                source_category=category,
+                source_sub_category=_truncate_text(data.get("fromSubCategory", ""), MAX_STYLE_NAME_LENGTH),
+                sub_category=sub_category,
+            )
+            return favorite_response(result)
         if action == "delete_favorite":
-            removed = _delete_prompt_all_in_one_item("favorite", kind, item_id, prompt)
-            return web.json_response({
-                "success": removed,
-                "favorites": {
-                    "positive": _load_prompt_all_in_one_favorites("positive"),
-                    "negative": _load_prompt_all_in_one_favorites("negative"),
-                },
-            })
+            result = _mutate_prompt_all_in_one_favorites(
+                kind,
+                "delete",
+                item_ids=[item_id] if item_id else [],
+                prompt=prompt,
+            )
+            return favorite_response(result, require_change=True)
+        if action == "delete_favorites":
+            result = _mutate_prompt_all_in_one_favorites(
+                kind,
+                "delete",
+                item_ids=data.get("ids") if isinstance(data.get("ids"), list) else [],
+            )
+            return favorite_response(result)
+        if action == "delete_favorite_category":
+            result = _mutate_prompt_all_in_one_favorites(
+                kind,
+                "delete_category",
+                source_category=category,
+            )
+            return favorite_response(result)
+        if action == "delete_favorite_subcategory":
+            result = _mutate_prompt_all_in_one_favorites(
+                kind,
+                "delete_sub_category",
+                source_category=category,
+                source_sub_category=sub_category,
+            )
+            return favorite_response(result)
         if action == "latest_history":
             return web.json_response({"success": True, "item": _latest_prompt_all_in_one_history(kind)})
         if action == "clear_history":

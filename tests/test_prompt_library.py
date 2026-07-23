@@ -375,6 +375,77 @@ class PromptLibraryTests(unittest.TestCase):
         self.assertEqual(len(remaining), 299)
         self.assertNotIn("favorite-280", {item["id"] for item in remaining})
 
+    def test_legacy_favorites_remain_readable_without_category_migration(self):
+        legacy = [{
+            "id": "legacy-favorite",
+            "name": "Legacy",
+            "prompt": "legacy_tag",
+            "tags": [{"value": "legacy_tag", "disabled": False}],
+        }]
+        with mock.patch.object(NODES, "_storage_get", return_value=legacy), mock.patch.object(NODES, "_storage_set") as write_storage:
+            loaded = NODES._load_prompt_all_in_one_favorites("positive")
+
+        self.assertEqual(loaded[0]["category"], "")
+        self.assertEqual(loaded[0]["subCategory"], "")
+        self.assertNotIn("category", legacy[0])
+        write_storage.assert_not_called()
+
+    def test_favorite_batch_mutations_read_and_write_once(self):
+        base_items = [
+            {"id": "a", "name": "A", "prompt": "tag_a", "category": "Old", "subCategory": "One", "tags": []},
+            {"id": "b", "name": "B", "prompt": "tag_b", "category": "Old", "subCategory": "One", "tags": []},
+            {"id": "c", "name": "C", "prompt": "tag_c", "category": "Keep", "subCategory": "Two", "tags": []},
+        ]
+        cases = {
+            "push": lambda: NODES._mutate_prompt_all_in_one_favorites(
+                "positive",
+                "push",
+                entries=[{"prompt": "tag_new", "name": "New", "category": "New", "subCategory": "Leaf"}],
+            ),
+            "move": lambda: NODES._mutate_prompt_all_in_one_favorites(
+                "positive",
+                "update",
+                item_ids=["a", "b"],
+                category="Moved",
+                sub_category="Target",
+            ),
+            "rename": lambda: NODES._mutate_prompt_all_in_one_favorites(
+                "positive",
+                "rename_category",
+                source_category="Old",
+                category="Renamed",
+            ),
+            "delete": lambda: NODES._mutate_prompt_all_in_one_favorites(
+                "positive",
+                "delete_sub_category",
+                source_category="Old",
+                source_sub_category="One",
+            ),
+            "delete_ids": lambda: NODES._mutate_prompt_all_in_one_favorites(
+                "positive",
+                "delete",
+                item_ids=["a", "b"],
+            ),
+        }
+        for label, operation in cases.items():
+            with self.subTest(operation=label), mock.patch.object(
+                NODES,
+                "_storage_get",
+                return_value=base_items,
+            ) as read_storage, mock.patch.object(
+                NODES,
+                "_storage_set",
+            ) as write_storage, mock.patch.object(
+                NODES,
+                "_prompt_to_storage_tags",
+                return_value=[],
+            ):
+                result = operation()
+
+            self.assertGreater(result["changed"], 0)
+            read_storage.assert_called_once()
+            write_storage.assert_called_once()
+
     def test_positive_prompt_node_applies_lora_to_connected_model_and_clip(self):
         node = NODES.WebUIPromptBridgePositivePrompt()
         with (

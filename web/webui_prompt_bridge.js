@@ -4223,14 +4223,26 @@ function splitPromptTags(text) {
     return tags;
 }
 
+const localTagMapCache = new WeakMap();
+
 function buildLocalTagMap(state) {
+    const autocomplete = state.autocomplete || [];
+    const groupTags = state.promptAllInOne?.group_tags || [];
+    const loras = state.loras || [];
+    const cached = localTagMapCache.get(state);
+    if (cached
+        && cached.autocomplete === autocomplete
+        && cached.groupTags === groupTags
+        && cached.loras === loras) {
+        return cached.map;
+    }
     const map = new Map();
-    for (const item of state.autocomplete || []) {
+    for (const item of autocomplete) {
         const prompt = String(item.text || "").trim();
         const local = String(item.local || "").trim();
         if (prompt && local) map.set(prompt.toLowerCase(), local);
     }
-    for (const group of state.promptAllInOne?.group_tags || []) {
+    for (const group of groupTags) {
         for (const subGroup of group.groups || []) {
             for (const tag of subGroup.tags || []) {
                 const prompt = String(tag.prompt || "").trim();
@@ -4239,9 +4251,10 @@ function buildLocalTagMap(state) {
             }
         }
     }
-    for (const item of state.loras || []) {
+    for (const item of loras) {
         if (item.prompt && item.alias) map.set(String(item.prompt).toLowerCase(), item.alias);
     }
+    localTagMapCache.set(state, { autocomplete, groupTags, loras, map });
     return map;
 }
 
@@ -4808,9 +4821,28 @@ function setLayers(value, open, close, delta) {
     return `${open.repeat(count)}${text}${close.repeat(count)}`;
 }
 
-function favoriteForPrompt(state, kind, prompt) {
+const favoritePromptIndexCache = new WeakMap();
+
+function favoritePromptIndex(state, kind) {
+    const favorites = state.promptAllInOne?.favorites?.[kind] || [];
+    const cachedByKind = favoritePromptIndexCache.get(state) || {};
+    const cached = cachedByKind[kind];
+    if (cached?.favorites === favorites) return cached.map;
+    const map = new Map();
+    for (const item of favorites) {
+        const key = String(item.prompt || "").trim();
+        if (!key) continue;
+        if (!map.has(key)) map.set(key, []);
+        map.get(key).push(item);
+    }
+    cachedByKind[kind] = { favorites, map };
+    favoritePromptIndexCache.set(state, cachedByKind);
+    return map;
+}
+
+function favoritesForPrompt(state, kind, prompt) {
     const target = String(prompt || "").trim();
-    return (state.promptAllInOne?.favorites?.[kind] || []).find((item) => String(item.prompt || "").trim() === target);
+    return favoritePromptIndex(state, kind).get(target) || [];
 }
 
 function promptSeparatorMarker(separator) {
@@ -4865,7 +4897,11 @@ function positionChipTools(chips, chip, tools) {
 }
 
 async function refreshFavoritesFromResult(state, result) {
-    if (result?.favorites) state.promptAllInOne.favorites = result.favorites;
+    if (!result?.favorites) return;
+    state.promptAllInOne.favorites = {
+        ...(state.promptAllInOne?.favorites || {}),
+        ...result.favorites,
+    };
 }
 
 function renderPromptChips(row, textarea, state, afterChange, kind = "positive") {
@@ -4882,7 +4918,7 @@ function renderPromptChips(row, textarea, state, afterChange, kind = "positive")
         if (index >= parsedTags.length) selectedTags.delete(index);
     }
     chips.classList.remove("drag-active");
-    chips.innerHTML = "";
+    const fragment = document.createDocumentFragment();
     if (!row.__webuiBridgeDisabledTags) row.__webuiBridgeDisabledTags = [];
     const tags = parsedTags.slice(0, 160);
     const focusMovedTag = (index) => window.requestAnimationFrame?.(() => {
@@ -4941,7 +4977,8 @@ function renderPromptChips(row, textarea, state, afterChange, kind = "positive")
             title = `${tag.value}\n已禁用，不会写入生成提示词`;
         }
         if (!tag.disabled && selectedTags.has(tag.index)) className += " selected";
-        const favorite = favoriteForPrompt(state, kind, tag.value);
+        const matchingFavorites = favoritesForPrompt(state, kind, tag.value);
+        const favorite = matchingFavorites[0] || null;
         let tools = null;
         const chip = el("div", {
             class: className,
@@ -5116,9 +5153,8 @@ function renderPromptChips(row, textarea, state, afterChange, kind = "positive")
                 if (next) replacePromptTagAt(textarea, tag.index, next);
             }),
             tool("⧉", "复制当前关键词", () => navigator.clipboard.writeText(tag.value).catch(() => {})),
-            tool(favorite ? "★" : "☆", favorite ? "取消收藏" : "加入收藏", async () => {
-                if (favorite && !confirm("只删除这个收藏项？")) return;
-                const action = favorite ? "delete_favorite" : "push_favorite";
+            tool(favorite ? "★" : "☆", favorite ? "取消该 Prompt 的全部收藏" : "加入收藏", async () => {
+                if (favorite && !confirm(`取消这个 Prompt 的 ${matchingFavorites.length} 个收藏项？`)) return;
                 let name = local || "";
                 if (!favorite && !name) {
                     try {
@@ -5126,7 +5162,11 @@ function renderPromptChips(row, textarea, state, afterChange, kind = "positive")
                         name = locals[0] || "";
                     } catch {}
                 }
-                const result = await updatePromptAllInOneStorage(action, kind, tag.value, name || tag.value, favorite?.id || "");
+                const result = favorite
+                    ? await updatePromptAllInOneStorage("delete_favorites", kind, "", "", "", "", "", {
+                        ids: matchingFavorites.map((item) => item.id).filter(Boolean),
+                    })
+                    : await updatePromptAllInOneStorage("push_favorite", kind, tag.value, name || tag.value);
                 await refreshFavoritesFromResult(state, result);
                 row.__webuiBridgeRenderPanels?.();
             }, favorite ? "favorite active" : "favorite"),
@@ -5185,10 +5225,10 @@ function renderPromptChips(row, textarea, state, afterChange, kind = "positive")
             if (item.disabled) row.__webuiBridgeDisabledTags.splice(item.index, 1);
             else removePromptTagAt(textarea, item.index);
         }
-        chips.append(chip);
+        fragment.append(chip);
         const separatorMarker = !tag.disabled ? promptSeparatorMarker(tag.separatorAfter) : null;
         if (separatorMarker) {
-            chips.append(el("div", {
+            fragment.append(el("div", {
                 class: "webui-bridge-prompt-chip webui-bridge-prompt-separator-chip",
                 title: `${separatorMarker.title}\n点击删除换行符`,
                 draggable: "false",
@@ -5238,6 +5278,7 @@ function renderPromptChips(row, textarea, state, afterChange, kind = "positive")
             });
         }
     }
+    chips.replaceChildren(fragment);
     const plainTags = translatableChips.map((item) => item.value);
     translateTagsToLocal(plainTags).then((locals) => {
         if (!chips.isConnected || row.__webuiBridgeChipRenderToken !== renderToken) return;
@@ -8730,13 +8771,28 @@ function installPromptOnlyPanel(node, config, configuredData = null) {
     setLibraryExpanded(Boolean(configuredExpanded), { load: Boolean(configuredExpanded), silent: true });
 }
 
-async function updatePromptAllInOneStorage(action, kind, prompt = "", name = "", id = "", category = "", subCategory = "") {
+async function updatePromptAllInOneStorage(action, kind, prompt = "", name = "", id = "", category = "", subCategory = "", extra = {}) {
     const response = await api.fetchApi("/webui_prompt_bridge/prompt_all_in_one/storage", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, kind, prompt, name, id, category, subCategory, lang: "zh_CN" }),
+        body: JSON.stringify({ action, kind, prompt, name, id, category, subCategory, lang: "zh_CN", ...extra }),
     });
     return bridgeJson(response, "更新提示词收藏失败");
+}
+
+function readLocalStringArray(key) {
+    try {
+        const value = JSON.parse(localStorage.getItem(key) || "[]");
+        if (!Array.isArray(value)) return [];
+        return [...new Set(value.map((item) => String(item || "").trim()).filter(Boolean))];
+    } catch {
+        try { localStorage.removeItem(key); } catch {}
+        return [];
+    }
+}
+
+function writeLocalStringArray(key, values) {
+    writeLocalString(key, JSON.stringify([...new Set((values || []).map((item) => String(item || "").trim()).filter(Boolean))]));
 }
 
 function normalizeWebUISampler(name) {
@@ -9254,6 +9310,20 @@ function queueErrorMessage(error) {
 let __webuiBridgeDraggedTag = null;
 let __webuiBridgeTabDrag = null; // { index, type: 'parent' | 'child', parentCatName? }
 
+function clearFavoriteDragState() {
+    __webuiBridgeDraggedTag = null;
+    __webuiBridgeTabDrag = null;
+    document.querySelectorAll(".webui-bridge-aio-tag.dragging, .webui-bridge-aio-tabs .dragging, .webui-bridge-aio-subtabs .dragging").forEach((node) => {
+        node.classList.remove("dragging");
+    });
+    document.querySelectorAll(".webui-bridge-aio-body.drop-target, .webui-bridge-aio-tabs .drop-target, .webui-bridge-aio-subtabs .drop-target").forEach((node) => {
+        node.classList.remove("drop-target");
+    });
+    document.querySelectorAll(".webui-bridge-tab-insert-before, .webui-bridge-tab-insert-after").forEach((node) => {
+        node.classList.remove("webui-bridge-tab-insert-before", "webui-bridge-tab-insert-after");
+    });
+}
+
 function __webuiBridgeHandleDragStart(event, tag) {
     __webuiBridgeDraggedTag = tag;
     event.dataTransfer.effectAllowed = "move";
@@ -9302,12 +9372,15 @@ function createTagButton(tag, textarea, sync, rerender, isNegative = false, stat
         title: [label && label !== prompt ? label : "", tag.name && tag.name !== label ? tag.name : "", prompt].filter(Boolean).join("\n"),
         onclick: async () => {
             await updatePromptAreaWithLoraKeywords(textarea, prompt, isNegative, sync);
-            rerender?.();
         },
     }, children);
     // 收藏标签支持拖拽
     if (tag.favoriteItem && tag.draggable) {
-        button.addEventListener("dragstart", (e) => __webuiBridgeHandleDragStart(e, tag));
+        button.addEventListener("dragstart", (event) => {
+            __webuiBridgeHandleDragStart(event, tag);
+            button.classList.add("dragging");
+        });
+        button.addEventListener("dragend", clearFavoriteDragState);
     }
     button.classList.toggle("selected", promptContains(textarea.value, prompt, isNegative));
     return button;
@@ -9320,6 +9393,10 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
     const tabs = el("div", { class: "webui-bridge-aio-tabs" });
     const subTabs = el("div", { class: "webui-bridge-aio-subtabs" });
     const body = el("div", { class: "webui-bridge-aio-body" });
+    const pagePrev = el("button", { class: "webui-bridge-aio-page-prev", type: "button", title: "上一页" }, "‹");
+    const pageInfo = el("span", { class: "webui-bridge-aio-page-info" }, "第 1/1 页 · 共 0 条");
+    const pageNext = el("button", { class: "webui-bridge-aio-page-next", type: "button", title: "下一页" }, "›");
+    const pager = el("div", { class: "webui-bridge-aio-pager", hidden: "hidden" }, [pagePrev, pageInfo, pageNext]);
     let __webuiBridgeBodyDragTimer = null;
     body.addEventListener("dragover", (e) => {
         // Skip body highlight only for same-area tag reorder (not cross-category transfer)
@@ -9423,6 +9500,7 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
                 action: () => {
                     activeGroup = groups.findIndex((group) => group.type === "favorite");
                     activeSubGroup = 0;
+                    favoritePage = 0;
                     if (activeGroup < 0) activeGroup = 0;
                     saveActive();
                     render();
@@ -9539,7 +9617,7 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
         const name = prompt("收藏名称", textarea.value.slice(0, 40));
         if (name === null) return;
         const result = await updatePromptAllInOneStorage("push_favorite", kind, textarea.value, name);
-        if (result.favorites) state.promptAllInOne.favorites = result.favorites;
+        await refreshFavoritesFromResult(state, result);
         hint.textContent = "已加入收藏";
         render();
     };
@@ -9567,6 +9645,7 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
         subTabs,
         appendRow,
         body,
+        pager,
         hint,
         colorRow,
         createHeightResizeGrip(root, panelHeightKey, { min: root.__webuiBridgeMinHeight, max: 680, title: "拖动调整收藏/标签列表高度，双击恢复" }),
@@ -9577,6 +9656,17 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
     let activeSubGroup = 0;
     let fullSearchQuery = "";
     let fullSearchItems = [];
+    let favoritePage = 0;
+    const favoritePageSize = 100;
+    pagePrev.addEventListener("click", () => {
+        if (favoritePage <= 0) return;
+        favoritePage -= 1;
+        renderBody();
+    });
+    pageNext.addEventListener("click", () => {
+        favoritePage += 1;
+        renderBody();
+    });
     const storageKey = `webui-bridge-aio-${kind}`;
     try {
         const saved = JSON.parse(localStorage.getItem(storageKey) || "{}");
@@ -9613,14 +9703,9 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
 
         // 从 localStorage 读取自定义父级分类（空分类也显示）
         const customCatsKey = `webui-bridge-favorite-categories-${kind}`;
-        try {
-            const customCats = JSON.parse(localStorage.getItem(customCatsKey) || "[]");
-            customCats.forEach((cat) => {
-                if (!categoryMap.has(cat)) {
-                    categoryMap.set(cat, new Map());
-                }
-            });
-        } catch {}
+        readLocalStringArray(customCatsKey).forEach((cat) => {
+            if (!categoryMap.has(cat)) categoryMap.set(cat, new Map());
+        });
 
         favoriteItems.forEach((item) => {
             const cat = item.category || defaultCategory;
@@ -9669,44 +9754,31 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
 
         // 构建收藏分类组
         const favoriteGroups = [];
-        const customCatsForSort = JSON.parse(localStorage.getItem(customCatsKey) || "[]");
+        const customCatsForSort = readLocalStringArray(customCatsKey);
         const sortedCategories = sortByCustomOrder(Array.from(categoryMap.keys()), customCatsForSort, defaultCategory);
 
         sortedCategories.forEach((catName) => {
             const subMap = categoryMap.get(catName);
             // 从 localStorage 读取该分类下的自定义子分类
             const customSubCatsKey = `webui-bridge-favorite-subcategories-${kind}-${catName}`;
-            try {
-                const customSubCats = JSON.parse(localStorage.getItem(customSubCatsKey) || "[]");
-                customSubCats.forEach((subCat) => {
-                    if (!subMap.has(subCat)) {
-                        subMap.set(subCat, []);
-                    }
-                });
-            } catch {}
+            readLocalStringArray(customSubCatsKey).forEach((subCat) => {
+                if (!subMap.has(subCat)) subMap.set(subCat, []);
+            });
 
             const subGroups = [];
             const customSubCatsKey2 = `webui-bridge-favorite-subcategories-${kind}-${catName}`;
-            const customSubCatsForSort = JSON.parse(localStorage.getItem(customSubCatsKey2) || "[]");
+            const customSubCatsForSort = readLocalStringArray(customSubCatsKey2);
             const sortedSubCats = sortByCustomOrder(Array.from(subMap.keys()), customSubCatsForSort, defaultSubCategory);
             sortedSubCats.forEach((subCatName) => {
                 const tags = subMap.get(subCatName) || [];
                 // 应用自定义标签排序
                 const tagOrderKey = `webui-bridge-favorite-tag-order-${kind}-${encodeURIComponent(catName)}-${encodeURIComponent(subCatName)}`;
-                try {
-                    const tagOrder = JSON.parse(localStorage.getItem(tagOrderKey) || "[]");
-                    if (tagOrder.length) {
-                        const tagOrderMap = new Map(tagOrder.map((prompt, i) => [String(prompt).trim(), i]));
-                        tags.sort((a, b) => {
-                            const ap = String(a.prompt || "").trim();
-                            const bp = String(b.prompt || "").trim();
-                            const ai = tagOrderMap.has(ap) ? tagOrderMap.get(ap) : Infinity;
-                            const bi = tagOrderMap.has(bp) ? tagOrderMap.get(bp) : Infinity;
-                            if (ai !== bi) return ai - bi;
-                            return 0;
-                        });
-                    }
-                } catch {}
+                const tagOrder = readLocalStringArray(tagOrderKey);
+                if (tagOrder.length) {
+                    const tagOrderMap = new Map(tagOrder.map((value, i) => [value, i]));
+                    const orderFor = (tag) => tagOrderMap.get(tag.id) ?? tagOrderMap.get(String(tag.prompt || "").trim()) ?? Infinity;
+                    tags.sort((a, b) => orderFor(a) - orderFor(b));
+                }
                 subGroups.push({
                     name: subCatName,
                     tags,
@@ -9792,6 +9864,7 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
                 onclick: () => {
                     activeGroup = index;
                     activeSubGroup = 0;
+                    favoritePage = 0;
                     saveActive();
                     render();
                 },
@@ -9805,13 +9878,7 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
                     e.dataTransfer.setData("text/plain", oldName);
                     tabBtn.classList.add("dragging");
                 });
-                tabBtn.addEventListener("dragend", () => {
-                    tabBtn.classList.remove("dragging");
-                    document.querySelectorAll(".webui-bridge-tab-insert-before, .webui-bridge-tab-insert-after").forEach((el) => {
-                        el.classList.remove("webui-bridge-tab-insert-before", "webui-bridge-tab-insert-after");
-                    });
-                    __webuiBridgeTabDrag = null;
-                });
+                tabBtn.addEventListener("dragend", clearFavoriteDragState);
                 tabBtn.addEventListener("dragover", (e) => {
                     if (__webuiBridgeTabDrag && __webuiBridgeTabDrag.type === "parent") {
                         e.preventDefault();
@@ -9842,24 +9909,16 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
                         const rect = tabBtn.getBoundingClientRect();
                         const after = e.clientX > rect.left + rect.width / 2;
                         const customCatsKey = `webui-bridge-favorite-categories-${kind}`;
-                        try {
-                            const customCats = JSON.parse(localStorage.getItem(customCatsKey) || "[]");
-                            const favGroups = groups.filter((g) => g.type === "favorite");
-                            const ordered = favGroups.map((g) => g.categoryName || g.name?.replace(/^★ /, ""));
-                            // Remove dragged item from current position
-                            const currentIdx = ordered.indexOf(fromCatName);
-                            if (currentIdx >= 0) ordered.splice(currentIdx, 1);
-                            // Find insert position relative to target
-                            let targetIdx = ordered.indexOf(toCatName);
-                            if (targetIdx >= 0) {
-                                if (after) targetIdx++;
-                            } else {
-                                targetIdx = ordered.length;
-                            }
-                            ordered.splice(Math.min(targetIdx, ordered.length), 0, fromCatName);
-                            localStorage.setItem(customCatsKey, JSON.stringify(ordered));
-                        } catch {}
-                        __webuiBridgeTabDrag = null;
+                        const favGroups = groups.filter((g) => g.type === "favorite");
+                        const ordered = favGroups.map((g) => g.categoryName || g.name?.replace(/^★ /, ""));
+                        const currentIdx = ordered.indexOf(fromCatName);
+                        if (currentIdx >= 0) ordered.splice(currentIdx, 1);
+                        let targetIdx = ordered.indexOf(toCatName);
+                        if (targetIdx < 0) targetIdx = ordered.length;
+                        else if (after) targetIdx += 1;
+                        ordered.splice(Math.min(targetIdx, ordered.length), 0, fromCatName);
+                        writeLocalStringArray(customCatsKey, ordered);
+                        clearFavoriteDragState();
                         render();
                         return;
                     }
@@ -9888,32 +9947,19 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
                             closePopup();
                             const newName = prompt("输入新名称", oldName);
                             if (!newName || newName === oldName) return;
-                            const favoriteItems = state.promptAllInOne?.favorites?.[kind] || [];
-                            let lastResult;
-                            for (const item of favoriteItems) {
-                                const itemCat = item.category || "新增提示词";
-                                if (itemCat === oldName) {
-                                    lastResult = await updatePromptAllInOneStorage("update_favorite", kind, item.prompt, "", item.id, newName, item.subCategory || "");
-                                }
-                            }
-                            if (lastResult?.favorites) state.promptAllInOne.favorites = lastResult.favorites;
+                            const result = await updatePromptAllInOneStorage("rename_favorite_category", kind, "", "", "", newName, "", {
+                                fromCategory: oldName,
+                            });
+                            await refreshFavoritesFromResult(state, result);
                             const customCatsKey = `webui-bridge-favorite-categories-${kind}`;
-                            try {
-                                const customCats = JSON.parse(localStorage.getItem(customCatsKey) || "[]");
-                                const idx = customCats.indexOf(oldName);
-                                if (idx >= 0) customCats[idx] = newName;
-                                localStorage.setItem(customCatsKey, JSON.stringify(customCats));
-                            } catch {}
+                            const customCats = readLocalStringArray(customCatsKey).map((value) => value === oldName ? newName : value);
+                            writeLocalStringArray(customCatsKey, customCats);
                             // 同时更新子分类的 localStorage key
                             const oldSubCatsKey = `webui-bridge-favorite-subcategories-${kind}-${oldName}`;
                             const newSubCatsKey = `webui-bridge-favorite-subcategories-${kind}-${newName}`;
-                            try {
-                                const subCats = localStorage.getItem(oldSubCatsKey);
-                                if (subCats !== null) {
-                                    localStorage.setItem(newSubCatsKey, subCats);
-                                    localStorage.removeItem(oldSubCatsKey);
-                                }
-                            } catch {}
+                            const subCats = readLocalStringArray(oldSubCatsKey);
+                            if (subCats.length) writeLocalStringArray(newSubCatsKey, subCats);
+                            try { localStorage.removeItem(oldSubCatsKey); } catch {}
                             render();
                         },
                     }, "✎ 重命名");
@@ -9927,22 +9973,10 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
                                 const favoriteItems = state.promptAllInOne?.favorites?.[kind] || [];
                                 const itemsToDelete = favoriteItems.filter((item) => (item.category || "新增提示词") === oldName);
                                 if (!confirm(`确定删除分类「${oldName}」吗？分类下 ${itemsToDelete.length} 个收藏项将全部被删除。`)) return;
-                                for (const item of itemsToDelete) {
-                                    await updatePromptAllInOneStorage("delete_favorite", kind, item.prompt, "", item.id);
-                                }
-                                // 从本地状态移除已删除项
-                                if (state.promptAllInOne?.favorites?.[kind]) {
-                                    state.promptAllInOne.favorites[kind] = favoriteItems.filter(
-                                        (item) => (item.category || "新增提示词") !== oldName
-                                    );
-                                }
+                                const result = await updatePromptAllInOneStorage("delete_favorite_category", kind, "", "", "", oldName);
+                                await refreshFavoritesFromResult(state, result);
                                 const customCatsKey = `webui-bridge-favorite-categories-${kind}`;
-                                try {
-                                    const customCats = JSON.parse(localStorage.getItem(customCatsKey) || "[]");
-                                    const idx = customCats.indexOf(oldName);
-                                    if (idx >= 0) customCats.splice(idx, 1);
-                                    localStorage.setItem(customCatsKey, JSON.stringify(customCats));
-                                } catch {}
+                                writeLocalStringArray(customCatsKey, readLocalStringArray(customCatsKey).filter((value) => value !== oldName));
                                 // 同时删除该分类下的自定义子分类
                                 const customSubCatsKey = `webui-bridge-favorite-subcategories-${kind}-${oldName}`;
                                 try { localStorage.removeItem(customSubCatsKey); } catch {}
@@ -9969,28 +10003,9 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
             onclick: async () => {
                 const name = prompt("输入新的父级分类名称", "");
                 if (!name) return;
-                // 添加一个空的分类（通过移动一个收藏项或直接创建）
-                // 这里我们创建一个临时分类，下次有收藏项加入时就会显示
-                const defaultCategory = "新增提示词";
-                const defaultSubCategory = "未分类";
-                // 找到第一个收藏项来创建新分类
-                const favoriteItems = state.promptAllInOne?.favorites?.[kind] || [];
-                if (favoriteItems.length > 0) {
-                    const firstItem = favoriteItems[0];
-                    const currentCat = firstItem.category || defaultCategory;
-                    const currentSubCat = firstItem.subCategory || defaultSubCategory;
-                    // 不移动任何项，只在UI上显示空分类（需要后端支持，这里简化处理）
-                    // 实际使用时，用户拖拽标签到新分类即可
-                }
                 // 保存自定义分类到 localStorage
                 const customCatsKey = `webui-bridge-favorite-categories-${kind}`;
-                try {
-                    const customCats = JSON.parse(localStorage.getItem(customCatsKey) || "[]");
-                    if (!customCats.includes(name)) {
-                        customCats.push(name);
-                        localStorage.setItem(customCatsKey, JSON.stringify(customCats));
-                    }
-                } catch {}
+                writeLocalStringArray(customCatsKey, [...readLocalStringArray(customCatsKey), name]);
                 render();
             },
         }, "+ 分类");
@@ -10010,6 +10025,7 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
                 class: (index === activeSubGroup ? "active" : "") + (isFavorite ? " webui-bridge-subtab-favorite" : ""),
                 onclick: () => {
                     activeSubGroup = index;
+                    favoritePage = 0;
                     saveActive();
                     render();
                 },
@@ -10022,13 +10038,7 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
                     e.dataTransfer.setData("text/plain", label);
                     btn.classList.add("dragging");
                 });
-                btn.addEventListener("dragend", () => {
-                    btn.classList.remove("dragging");
-                    document.querySelectorAll(".webui-bridge-tab-insert-before, .webui-bridge-tab-insert-after").forEach((el) => {
-                        el.classList.remove("webui-bridge-tab-insert-before", "webui-bridge-tab-insert-after");
-                    });
-                    __webuiBridgeTabDrag = null;
-                });
+                btn.addEventListener("dragend", clearFavoriteDragState);
                 btn.addEventListener("dragover", (e) => {
                     if (__webuiBridgeTabDrag && __webuiBridgeTabDrag.type === "child") {
                         e.preventDefault();
@@ -10059,20 +10069,15 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
                         const rect = btn.getBoundingClientRect();
                         const after = e.clientX > rect.left + rect.width / 2;
                         const customSubCatsKey = `webui-bridge-favorite-subcategories-${kind}-${parentCatName}`;
-                        try {
-                            const ordered = cleanSubGroups.map((g) => g.name);
-                            const currentIdx = ordered.indexOf(fromSubCatName);
-                            if (currentIdx >= 0) ordered.splice(currentIdx, 1);
-                            let targetIdx = ordered.indexOf(toSubCatName);
-                            if (targetIdx >= 0) {
-                                if (after) targetIdx++;
-                            } else {
-                                targetIdx = ordered.length;
-                            }
-                            ordered.splice(Math.min(targetIdx, ordered.length), 0, fromSubCatName);
-                            localStorage.setItem(customSubCatsKey, JSON.stringify(ordered));
-                        } catch {}
-                        __webuiBridgeTabDrag = null;
+                        const ordered = cleanSubGroups.map((g) => g.name);
+                        const currentIdx = ordered.indexOf(fromSubCatName);
+                        if (currentIdx >= 0) ordered.splice(currentIdx, 1);
+                        let targetIdx = ordered.indexOf(toSubCatName);
+                        if (targetIdx < 0) targetIdx = ordered.length;
+                        else if (after) targetIdx += 1;
+                        ordered.splice(Math.min(targetIdx, ordered.length), 0, fromSubCatName);
+                        writeLocalStringArray(customSubCatsKey, ordered);
+                        clearFavoriteDragState();
                         render();
                         return;
                     }
@@ -10101,23 +10106,13 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
                             closeSubPopup();
                             const newName = prompt("输入新名称", label);
                             if (!newName || newName === label) return;
-                            const favoriteItems = state.promptAllInOne?.favorites?.[kind] || [];
-                            let lastResult;
-                            for (const item of favoriteItems) {
-                                const itemCat = item.category || "新增提示词";
-                                const itemSubCat = item.subCategory || "未分类";
-                                if (itemCat === parentCatName && itemSubCat === label) {
-                                    lastResult = await updatePromptAllInOneStorage("update_favorite", kind, item.prompt, "", item.id, "", newName);
-                                }
-                            }
-                            if (lastResult?.favorites) state.promptAllInOne.favorites = lastResult.favorites;
+                            const result = await updatePromptAllInOneStorage("rename_favorite_subcategory", kind, "", "", "", parentCatName, newName, {
+                                fromSubCategory: label,
+                            });
+                            await refreshFavoritesFromResult(state, result);
                             const customSubCatsKey = `webui-bridge-favorite-subcategories-${kind}-${parentCatName}`;
-                            try {
-                                const customSubCats = JSON.parse(localStorage.getItem(customSubCatsKey) || "[]");
-                                const idx = customSubCats.indexOf(label);
-                                if (idx >= 0) customSubCats[idx] = newName;
-                                localStorage.setItem(customSubCatsKey, JSON.stringify(customSubCats));
-                            } catch {}
+                            const customSubCats = readLocalStringArray(customSubCatsKey).map((value) => value === label ? newName : value);
+                            writeLocalStringArray(customSubCatsKey, customSubCats);
                             render();
                         },
                     }, "✎ 重命名");
@@ -10135,24 +10130,10 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
                                     return itemCat === parentCatName && itemSubCat === label;
                                 });
                                 if (!confirm(`确定删除子分类「${label}」吗？子分类下 ${itemsToDelete.length} 个收藏项将全部被删除。`)) return;
-                                for (const item of itemsToDelete) {
-                                    await updatePromptAllInOneStorage("delete_favorite", kind, item.prompt, "", item.id);
-                                }
-                                // 从本地状态移除已删除项
-                                if (state.promptAllInOne?.favorites?.[kind]) {
-                                    state.promptAllInOne.favorites[kind] = favoriteItems.filter((item) => {
-                                        const itemCat = item.category || "新增提示词";
-                                        const itemSubCat = item.subCategory || "未分类";
-                                        return !(itemCat === parentCatName && itemSubCat === label);
-                                    });
-                                }
+                                const result = await updatePromptAllInOneStorage("delete_favorite_subcategory", kind, "", "", "", parentCatName, label);
+                                await refreshFavoritesFromResult(state, result);
                                 const customSubCatsKey = `webui-bridge-favorite-subcategories-${kind}-${parentCatName}`;
-                                try {
-                                    const customSubCats = JSON.parse(localStorage.getItem(customSubCatsKey) || "[]");
-                                    const idx = customSubCats.indexOf(label);
-                                    if (idx >= 0) customSubCats.splice(idx, 1);
-                                    localStorage.setItem(customSubCatsKey, JSON.stringify(customSubCats));
-                                } catch {}
+                                writeLocalStringArray(customSubCatsKey, readLocalStringArray(customSubCatsKey).filter((value) => value !== label));
                                 render();
                             },
                         }, "× 删除子分类");
@@ -10180,13 +10161,7 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
                     if (!name) return;
                     // 保存自定义子分类到 localStorage
                     const customSubCatsKey = `webui-bridge-favorite-subcategories-${kind}-${activeGroupItem.categoryName}`;
-                    try {
-                        const customSubCats = JSON.parse(localStorage.getItem(customSubCatsKey) || "[]");
-                        if (!customSubCats.includes(name)) {
-                            customSubCats.push(name);
-                            localStorage.setItem(customSubCatsKey, JSON.stringify(customSubCats));
-                        }
-                    } catch {}
+                    writeLocalStringArray(customSubCatsKey, [...readLocalStringArray(customSubCatsKey), name]);
                     render();
                 },
             }, "+ 子分类");
@@ -10195,39 +10170,71 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
     }
 
     function renderBody() {
-        body.innerHTML = "";
         const activeGroupItem = groups[activeGroup];
         const q = query.value.trim().toLowerCase();
+        const fragment = document.createDocumentFragment();
+        const showEmpty = (message) => fragment.append(el("div", { class: "webui-bridge-aio-empty" }, message));
+        pager.hidden = true;
         if (activeGroupItem?.type === "fullSearch") {
             if (!q) {
-                body.append(el("div", { class: "webui-bridge-aio-empty" }, "输入中文或英文关键词搜索完整 TagComplete 词库"));
-                return;
+                showEmpty("输入中文或英文关键词搜索完整 TagComplete 词库");
+            } else if (fullSearchQuery !== q) {
+                showEmpty("正在搜索完整词库...");
+            } else if (!fullSearchItems.length) {
+                showEmpty("完整词库中没有匹配的标签");
+            } else {
+                fullSearchItems.forEach((tag) => fragment.append(createTagButton(tag, textarea, sync, renderBody, isNegative, state)));
             }
-            if (fullSearchQuery !== q) {
-                body.append(el("div", { class: "webui-bridge-aio-empty" }, "正在搜索完整词库..."));
-                return;
-            }
-            if (!fullSearchItems.length) {
-                body.append(el("div", { class: "webui-bridge-aio-empty" }, "完整词库中没有匹配的标签"));
-                return;
-            }
-            fullSearchItems.forEach((tag) => body.append(createTagButton(tag, textarea, sync, renderBody, isNegative, state)));
+            body.replaceChildren(fragment);
             return;
         }
         const cleanSubGroups = (groups[activeGroup]?.groups || []).filter((group) => group.type !== "wrap");
         const subGroup = cleanSubGroups[activeSubGroup];
-        if (!subGroup) return;
-        const tags = (subGroup.tags || []).filter((tag) => {
+        if (!subGroup) {
+            body.replaceChildren(fragment);
+            return;
+        }
+        const isFavoriteGroup = activeGroupItem?.type === "favorite";
+        const sourceTags = isFavoriteGroup && q
+            ? groups.filter((group) => group.type === "favorite").flatMap((group) => (
+                (group.groups || []).filter((entry) => entry.type !== "wrap").flatMap((entry) => entry.tags || [])
+            ))
+            : (subGroup.tags || []);
+        const tags = sourceTags.filter((tag) => {
             if (!q) return true;
             return String(tag.prompt || "").toLowerCase().includes(q) || String(tag.local || "").toLowerCase().includes(q);
         });
         if (!tags.length) {
-            body.append(el("div", { class: "webui-bridge-aio-empty" }, q ? "没有匹配的标签" : "这个分组目前没有标签"));
+            favoritePage = 0;
+            if (isFavoriteGroup) {
+                pager.hidden = false;
+                pageInfo.textContent = "第 1/1 页 · 共 0 条";
+                pagePrev.disabled = true;
+                pageNext.disabled = true;
+            }
+            showEmpty(q ? "全部收藏中没有匹配的标签" : "这个分组目前没有标签");
+            body.replaceChildren(fragment);
             return;
         }
-        const isFavoriteGroup = activeGroupItem?.type === "favorite";
-        const visibleTags = isFavoriteGroup ? tags : tags.slice(0, 260);
-        visibleTags.forEach((tag) => body.append(createTagButton(tag, textarea, sync, render, isNegative, state)));
+        let visibleTags = tags.slice(0, 260);
+        if (isFavoriteGroup) {
+            const pageCount = Math.max(1, Math.ceil(tags.length / favoritePageSize));
+            favoritePage = Math.min(Math.max(0, favoritePage), pageCount - 1);
+            const start = favoritePage * favoritePageSize;
+            visibleTags = tags.slice(start, start + favoritePageSize);
+            pager.hidden = false;
+            pageInfo.textContent = `第 ${favoritePage + 1}/${pageCount} 页 · 共 ${tags.length} 条`;
+            pagePrev.disabled = favoritePage <= 0;
+            pageNext.disabled = favoritePage >= pageCount - 1;
+        }
+        visibleTags.forEach((tag) => fragment.append(createTagButton(tag, textarea, sync, render, isNegative, state)));
+        body.replaceChildren(fragment);
+    }
+
+    function syncVisibleTagSelection() {
+        for (const button of body.querySelectorAll(".webui-bridge-aio-tag[data-prompt]")) {
+            button.classList.toggle("selected", promptContains(textarea.value, button.dataset.prompt || "", isNegative));
+        }
     }
 
     function render() {
@@ -10238,224 +10245,55 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
         renderBody();
     }
 
-    // 分类右键菜单
-    function showCategoryContextMenu(event, categoryItem, level, parentGroup = null) {
-        // 移除已有的菜单
-        document.querySelectorAll(".webui-bridge-category-menu").forEach((m) => m.remove());
-
-        const menu = el("div", {
-            class: "webui-bridge-category-menu",
-            style: `position: fixed; left: ${event.clientX}px; top: ${event.clientY}px; z-index: 99999;`,
-        });
-
-        const renameItem = el("div", {
-            class: "webui-bridge-menu-item",
-            onclick: async () => {
-                const newName = prompt("输入新名称", categoryItem.name?.replace(/^★ /, "") || categoryItem.name || "");
-                if (!newName) return;
-                menu.remove();
-                if (level === "parent") {
-                    // 重命名父级分类：更新所有该分类下收藏项的 category
-                    const oldName = categoryItem.categoryName || categoryItem.name?.replace(/^★ /, "");
-                    const favoriteItems = state.promptAllInOne?.favorites?.[kind] || [];
-                    let lastResult;
-                    for (const item of favoriteItems) {
-                        const itemCat = item.category || "新增提示词";
-                        if (itemCat === oldName) {
-                            lastResult = await updatePromptAllInOneStorage("update_favorite", kind, item.prompt, "", item.id, newName, item.subCategory || "");
-                        }
-                    }
-                    if (lastResult?.favorites) state.promptAllInOne.favorites = lastResult.favorites;
-                    // 更新 localStorage 中的自定义分类
-                    const customCatsKey = `webui-bridge-favorite-categories-${kind}`;
-                    try {
-                        const customCats = JSON.parse(localStorage.getItem(customCatsKey) || "[]");
-                        const idx = customCats.indexOf(oldName);
-                        if (idx >= 0) customCats[idx] = newName;
-                        localStorage.setItem(customCatsKey, JSON.stringify(customCats));
-                    } catch {}
-                    // 同时更新子分类的 localStorage key
-                    const oldSubCatsKey = `webui-bridge-favorite-subcategories-${kind}-${oldName}`;
-                    const newSubCatsKey = `webui-bridge-favorite-subcategories-${kind}-${newName}`;
-                    try {
-                        const subCats = localStorage.getItem(oldSubCatsKey);
-                        if (subCats !== null) {
-                            localStorage.setItem(newSubCatsKey, subCats);
-                            localStorage.removeItem(oldSubCatsKey);
-                        }
-                    } catch {}
-                } else {
-                    // 重命名子级分类
-                    const oldName = categoryItem.name || "";
-                    const parentCatName = parentGroup?.categoryName || parentGroup?.name?.replace(/^★ /, "");
-                    const favoriteItems = state.promptAllInOne?.favorites?.[kind] || [];
-                    let lastResult;
-                    for (const item of favoriteItems) {
-                        const itemCat = item.category || "新增提示词";
-                        const itemSubCat = item.subCategory || "未分类";
-                        if (itemCat === parentCatName && itemSubCat === oldName) {
-                            lastResult = await updatePromptAllInOneStorage("update_favorite", kind, item.prompt, "", item.id, "", newName);
-                        }
-                    }
-                    if (lastResult?.favorites) state.promptAllInOne.favorites = lastResult.favorites;
-                    // 更新 localStorage 中的自定义子分类
-                    const customSubCatsKey = `webui-bridge-favorite-subcategories-${kind}-${parentCatName}`;
-                    try {
-                        const customSubCats = JSON.parse(localStorage.getItem(customSubCatsKey) || "[]");
-                        const idx = customSubCats.indexOf(oldName);
-                        if (idx >= 0) customSubCats[idx] = newName;
-                        localStorage.setItem(customSubCatsKey, JSON.stringify(customSubCats));
-                    } catch {}
-                }
-                render();
-            },
-        }, "重命名");
-
-        const deleteItem = el("div", {
-            class: "webui-bridge-menu-item danger",
-            onclick: async () => {
-                menu.remove();
-                if (level === "parent") {
-                    const oldName = categoryItem.categoryName || categoryItem.name?.replace(/^★ /, "");
-                    if (oldName === "新增提示词") {
-                        alert("默认分类不能删除");
-                        return;
-                    }
-                    // 删除该分类下所有收藏项
-                    const favoriteItems = state.promptAllInOne?.favorites?.[kind] || [];
-                    const itemsToDelete = favoriteItems.filter((item) => (item.category || "新增提示词") === oldName);
-                    if (!confirm(`确定删除分类「${oldName}」吗？分类下 ${itemsToDelete.length} 个收藏项将全部被删除。`)) {
-                        return;
-                    }
-                    for (const item of itemsToDelete) {
-                        await updatePromptAllInOneStorage("delete_favorite", kind, item.prompt, "", item.id);
-                    }
-                    // 从本地状态移除已删除项
-                    if (state.promptAllInOne?.favorites?.[kind]) {
-                        state.promptAllInOne.favorites[kind] = favoriteItems.filter(
-                            (item) => (item.category || "新增提示词") !== oldName
-                        );
-                    }
-                    // 从 localStorage 移除
-                    const customCatsKey = `webui-bridge-favorite-categories-${kind}`;
-                    try {
-                        const customCats = JSON.parse(localStorage.getItem(customCatsKey) || "[]");
-                        const idx = customCats.indexOf(oldName);
-                        if (idx >= 0) customCats.splice(idx, 1);
-                        localStorage.setItem(customCatsKey, JSON.stringify(customCats));
-                    } catch {}
-                    // 同时删除该分类下的自定义子分类
-                    const customSubCatsKey = `webui-bridge-favorite-subcategories-${kind}-${oldName}`;
-                    try { localStorage.removeItem(customSubCatsKey); } catch {}
-                } else {
-                    const oldName = categoryItem.name || "";
-                    if (oldName === "未分类") {
-                        alert("默认子分类不能删除");
-                        return;
-                    }
-                    const parentCatName = parentGroup?.categoryName || parentGroup?.name?.replace(/^★ /, "");
-                    const favoriteItems = state.promptAllInOne?.favorites?.[kind] || [];
-                    const itemsToDelete = favoriteItems.filter((item) => {
-                        const itemCat = item.category || "新增提示词";
-                        const itemSubCat = item.subCategory || "未分类";
-                        return itemCat === parentCatName && itemSubCat === oldName;
-                    });
-                    if (!confirm(`确定删除子分类「${oldName}」吗？子分类下 ${itemsToDelete.length} 个收藏项将全部被删除。`)) {
-                        return;
-                    }
-                    for (const item of itemsToDelete) {
-                        await updatePromptAllInOneStorage("delete_favorite", kind, item.prompt, "", item.id);
-                    }
-                    // 从本地状态移除已删除项
-                    if (state.promptAllInOne?.favorites?.[kind]) {
-                        state.promptAllInOne.favorites[kind] = favoriteItems.filter((item) => {
-                            const itemCat = item.category || "新增提示词";
-                            const itemSubCat = item.subCategory || "未分类";
-                            return !(itemCat === parentCatName && itemSubCat === oldName);
-                        });
-                    }
-                    // 从 localStorage 移除
-                    const customSubCatsKey2 = `webui-bridge-favorite-subcategories-${kind}-${parentCatName}`;
-                    try {
-                        const customSubCats = JSON.parse(localStorage.getItem(customSubCatsKey2) || "[]");
-                        const idx = customSubCats.indexOf(oldName);
-                        if (idx >= 0) customSubCats.splice(idx, 1);
-                        localStorage.setItem(customSubCatsKey2, JSON.stringify(customSubCats));
-                    } catch {}
-                }
-                render();
-            },
-        }, "删除分类");
-
-        menu.append(renameItem, deleteItem);
-        document.body.append(menu);
-
-        const closeMenu = () => {
-            menu.remove();
-            document.removeEventListener("click", closeMenu);
-        };
-        setTimeout(() => document.addEventListener("click", closeMenu), 0);
-    }
-
     // 拖拽放置处理
     async function handleDropOnCategory(event, targetCategory, targetSubCategory = "") {
         event.preventDefault();
         const draggedTag = __webuiBridgeDraggedTag;
         if (!draggedTag) return;
-
-        // 从 prompt 区拖拽芯片到收藏分类——新增收藏
-        if (draggedTag.fromChip && !draggedTag.favoriteItem) {
-            const prompts = draggedTag.selectedTagValues && draggedTag.selectedTagValues.length > 0
-                ? draggedTag.selectedTagValues
-                : [draggedTag.prompt].filter(Boolean);
-            for (const promptText of prompts) {
-                const trimmedText = String(promptText || "").trim();
-                // 用最新 state 检查是否已存在（空子分类等同于"未分类"）
-                const latestFavorites = state.promptAllInOne?.favorites?.[kind] || [];
-                const targetCat = (targetCategory || "") || "新增提示词";
-                const targetSub = (targetSubCategory || "") || "未分类";
-                const exists = latestFavorites.find((item) =>
-                    String(item.prompt || "").trim() === trimmedText
-                    && ((item.category || "") || "新增提示词") === targetCat
-                    && ((item.subCategory || "") || "未分类") === targetSub
-                );
-                if (exists) continue;
-                let name = draggedTag.local || "";
-                if (!name) {
-                    try {
-                        const locals = await translateTagsToLocal([promptText]);
-                        name = locals[0] || "";
-                    } catch {}
+        try {
+            // 从 prompt 区拖拽芯片到收藏分类——一次请求批量新增。
+            if (draggedTag.fromChip && !draggedTag.favoriteItem) {
+                const prompts = [...new Set((
+                    draggedTag.selectedTagValues?.length ? draggedTag.selectedTagValues : [draggedTag.prompt]
+                ).map((value) => String(value || "").trim()).filter(Boolean))];
+                const targetCat = targetCategory || "新增提示词";
+                const targetSub = targetSubCategory || "未分类";
+                const existing = new Set((state.promptAllInOne?.favorites?.[kind] || []).map((item) => [
+                    String(item.prompt || "").trim(),
+                    item.category || "新增提示词",
+                    item.subCategory || "未分类",
+                ].join("\u0000")));
+                const pending = prompts.filter((promptText) => !existing.has([promptText, targetCat, targetSub].join("\u0000")));
+                if (pending.length) {
+                    let locals = [];
+                    try { locals = await translateTagsToLocal(pending); } catch {}
+                    const items = pending.map((promptText, index) => ({
+                        prompt: promptText,
+                        name: locals[index] || (pending.length === 1 ? draggedTag.local : "") || promptText,
+                        category: targetCategory,
+                        subCategory: targetSubCategory,
+                    }));
+                    const result = await updatePromptAllInOneStorage("push_favorites", kind, "", "", "", "", "", { items });
+                    await refreshFavoritesFromResult(state, result);
                 }
-                const result = await updatePromptAllInOneStorage("push_favorite", kind, promptText, name || promptText, "", targetCategory, targetSubCategory);
-                if (result.favorites) state.promptAllInOne.favorites = result.favorites;
+                render();
+                return;
             }
-            __webuiBridgeDraggedTag = null;
+
+            if (!draggedTag.favoriteItem) return;
+            const currentCat = draggedTag.category || "新增提示词";
+            const currentSubCat = draggedTag.subCategory || "未分类";
+            const newCat = targetCategory || "新增提示词";
+            const newSubCat = targetSubCategory || currentSubCat;
+            if (currentCat === newCat && currentSubCat === newSubCat) return;
+            const result = await updatePromptAllInOneStorage("move_favorites", kind, "", "", "", newCat, newSubCat, {
+                ids: [draggedTag.id].filter(Boolean),
+            });
+            await refreshFavoritesFromResult(state, result);
             render();
-            return;
+        } finally {
+            clearFavoriteDragState();
         }
-
-        // 收藏项拖拽到不同分类——更新分类
-        if (!draggedTag.favoriteItem) {
-            __webuiBridgeDraggedTag = null;
-            return;
-        }
-
-        const currentCat = draggedTag.category || "新增提示词";
-        const currentSubCat = draggedTag.subCategory || "未分类";
-
-        if (currentCat === targetCategory && (!targetSubCategory || currentSubCat === targetSubCategory)) {
-            __webuiBridgeDraggedTag = null;
-            return;
-        }
-
-        // 更新收藏项的分类
-        const newCat = targetCategory;
-        const newSubCat = targetSubCategory || currentSubCat;
-        const result = await updatePromptAllInOneStorage("update_favorite", kind, draggedTag.prompt, "", draggedTag.id, newCat, newSubCat);
-        if (result.favorites) state.promptAllInOne.favorites = result.favorites;
-        __webuiBridgeDraggedTag = null;
-        render();
     }
 
     query.addEventListener("focus", () => {
@@ -10465,6 +10303,7 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
     query.addEventListener("input", () => {
         if (query.value.trim()) closeAppendMenu();
         else showAppendMenu();
+        favoritePage = 0;
         renderBody();
     });
     query.addEventListener("keydown", (event) => {
@@ -10510,7 +10349,7 @@ function createPromptAllInOnePanel(kind, title, textarea, state, sync) {
             render();
         },
     });
-    textarea.addEventListener("input", renderBody);
+    textarea.addEventListener("input", syncVisibleTagSelection);
     render();
     root.__webuiBridgeRender = render;
     return root;
@@ -10644,12 +10483,12 @@ function buildPanel(node) {
     migrateLayoutStorage(BRIDGE_LAYOUT_MIGRATED_STORAGE_KEYS);
     seedConfiguredLayoutState();
 
-    const sync = () => {
-        setWidgetValue(node, "positive_prompt", positive.textarea.value);
-        setWidgetValue(node, "negative_prompt", negative.textarea.value);
+    const sync = (side = "both") => {
+        if (side !== "negative") setWidgetValue(node, "positive_prompt", positive.textarea.value);
+        if (side !== "positive") setWidgetValue(node, "negative_prompt", negative.textarea.value);
         syncRegionalWidgets?.();
         syncGenerationWidgets?.();
-        updateCounters();
+        updateCounters(side);
     };
 
     const importUpstreamLoras = () => {
@@ -10702,9 +10541,8 @@ function buildPanel(node) {
                     const message = `${translatedByAI ? "AI " : ""}已自动翻译 ${translated.matched} 个关键词`;
                     setPromptTranslateStatus(textarea, message, false);
                     setStatus(message);
-                    sync();
-                    positiveTagPanel.__webuiBridgeRender?.();
-                    negativeTagPanel.__webuiBridgeRender?.();
+                    sync(kind);
+                    (kind === "negative" ? negativeTagPanel : positiveTagPanel).__webuiBridgeRender?.();
                 } else {
                     setPromptTranslateStatus(textarea, aiMode ? "AI 已返回，内容未变化" : "已检查，内容未变化", false);
                 }
@@ -10728,11 +10566,11 @@ function buildPanel(node) {
         textarea.__webuiBridgeAutoTranslateVersion = Number(textarea.__webuiBridgeAutoTranslateVersion || 0) + 1;
         if (textarea.__webuiBridgeAutoTranslating) {
             textarea.__webuiBridgeAutoTranslatePending = true;
-            sync();
+            sync(textarea.__webuiBridgeKind || "both");
             return;
         }
         setPromptTranslateStatus(textarea, "", false);
-        sync();
+        sync(textarea.__webuiBridgeKind || "both");
         scheduleAutoTranslateInput(textarea);
     };
 
@@ -10777,8 +10615,8 @@ function buildPanel(node) {
         });
     }
 
-    const positiveTagPanel = createPromptAllInOnePanel("positive", "提示词", positive.textarea, state, sync);
-    const negativeTagPanel = createPromptAllInOnePanel("negative", "反向词", negative.textarea, state, sync);
+    const positiveTagPanel = createPromptAllInOnePanel("positive", "提示词", positive.textarea, state, () => sync("positive"));
+    const negativeTagPanel = createPromptAllInOnePanel("negative", "反向词", negative.textarea, state, () => sync("negative"));
     const renderPromptPanels = () => {
         positiveTagPanel.__webuiBridgeRender?.();
         negativeTagPanel.__webuiBridgeRender?.();
@@ -14372,11 +14210,12 @@ function buildPanel(node) {
         scheduleManualResizeSettle();
     };
 
-    const updateCounters = () => {
+    const updateCounters = (side = "both") => {
         for (const item of [
             { ...positive, kind: "positive" },
             { ...negative, kind: "negative" },
         ]) {
+            if (side !== "both" && side !== item.kind) continue;
             const errors = bracketErrors(item.textarea.value);
             const stats = promptStats(item.textarea.value);
             const tokenText = `${stats.tags}/75${stats.loras.length ? ` L${stats.loras.length}` : ""}`;
@@ -14384,7 +14223,7 @@ function buildPanel(node) {
             item.counter.classList.toggle("error", errors.length > 0);
             item.textarea.classList.toggle("error", errors.length > 0);
             item.textarea.title = errors.length ? errors.join("\n") : "";
-            renderPromptChips(item.row, item.textarea, state, sync, item.kind);
+            renderPromptChips(item.row, item.textarea, state, () => sync(item.kind), item.kind);
         }
     };
 
@@ -18766,6 +18605,34 @@ function addStyles() {
         .webui-bridge-aio-negative .webui-bridge-aio-body {
             min-height: 72px;
         }
+        .webui-bridge-aio-pager {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            min-height: 27px;
+            padding: 2px 8px;
+            border-top: 1px solid #2d3542;
+            background: #171e29;
+            color: #b8c6da;
+            font-size: 11px;
+        }
+        .webui-bridge-aio-pager[hidden] {
+            display: none;
+        }
+        .webui-bridge-aio-pager button {
+            min-width: 30px;
+            height: 22px;
+            border: 1px solid #39475c;
+            border-radius: 4px;
+            background: #252e3d;
+            color: #e8edf6;
+            cursor: pointer;
+        }
+        .webui-bridge-aio-pager button:disabled {
+            opacity: .38;
+            cursor: default;
+        }
         .webui-bridge-aio-empty {
             grid-column: 1 / -1;
             min-height: 52px;
@@ -18810,7 +18677,7 @@ function addStyles() {
             color: #ffc1c1;
             font-size: 12px;
             line-height: 15px;
-            opacity: 0;
+            opacity: .78;
         }
         .webui-bridge-aio-tag:hover .webui-bridge-aio-fav-remove {
             opacity: 1;
@@ -18873,29 +18740,6 @@ function addStyles() {
             color: #ff8a8a;
         }
         .webui-bridge-tab-popup-danger:hover {
-            background: rgba(255, 100, 100, 0.15);
-        }
-        .webui-bridge-category-menu {
-            background: #1a2332;
-            border: 1px solid #2f4057;
-            border-radius: 6px;
-            padding: 4px 0;
-            min-width: 120px;
-            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
-        }
-        .webui-bridge-menu-item {
-            padding: 6px 14px;
-            cursor: pointer;
-            color: #cbd3df;
-            font-size: 12px;
-        }
-        .webui-bridge-menu-item:hover {
-            background: #2a3648;
-        }
-        .webui-bridge-menu-item.danger {
-            color: #ff8a8a;
-        }
-        .webui-bridge-menu-item.danger:hover {
             background: rgba(255, 100, 100, 0.15);
         }
         .webui-bridge-aio-local,
