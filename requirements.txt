@@ -1,0 +1,9 @@
+pyyaml
+safetensors
+requests
+PyExecJS
+lxml
+tqdm
+pathos
+cryptography
+chardet
