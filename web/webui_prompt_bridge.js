@@ -8934,61 +8934,6 @@ function createTagButton(tag, textarea, sync, rerender, isNegative = false, stat
     // 收藏标签支持拖拽
     if (tag.favoriteItem && tag.draggable) {
         button.addEventListener("dragstart", (e) => __webuiBridgeHandleDragStart(e, tag));
-        button.addEventListener("dragover", (e) => {
-            const dragged = __webuiBridgeDraggedTag;
-            if (dragged?.favoriteItem && dragged.category === tag.category && dragged.subCategory === tag.subCategory) {
-                e.preventDefault();
-                e.stopPropagation();
-                e.dataTransfer.dropEffect = "move";
-                document.querySelectorAll(".webui-bridge-tag-insert-before, .webui-bridge-tag-insert-after").forEach((el) => {
-                    el.classList.remove("webui-bridge-tag-insert-before", "webui-bridge-tag-insert-after");
-                });
-                const rect = button.getBoundingClientRect();
-                const after = e.clientY > rect.top + rect.height / 2;
-                button.classList.add(after ? "webui-bridge-tag-insert-after" : "webui-bridge-tag-insert-before");
-            }
-        });
-        button.addEventListener("dragleave", () => {
-            button.classList.remove("webui-bridge-tag-insert-before", "webui-bridge-tag-insert-after");
-        });
-        button.addEventListener("drop", (e) => {
-            const dragged = __webuiBridgeDraggedTag;
-            if (dragged?.favoriteItem && dragged.category === tag.category && dragged.subCategory === tag.subCategory) {
-                e.preventDefault();
-                e.stopPropagation();
-                button.classList.remove("webui-bridge-tag-insert-before", "webui-bridge-tag-insert-after");
-                const rect = button.getBoundingClientRect();
-                const after = e.clientY > rect.top + rect.height / 2;
-                const tagKind = isNegative ? "negative" : "positive";
-                const tagOrderKey = `webui-bridge-favorite-tag-order-${tagKind}-${encodeURIComponent(tag.category)}-${encodeURIComponent(tag.subCategory)}`;
-                try {
-                    const tagOrder = JSON.parse(localStorage.getItem(tagOrderKey) || "[]");
-                    const draggedPrompt = String(dragged.prompt || "").trim();
-                    const targetPrompt = String(tag.prompt || "").trim();
-                    const fromIdx = tagOrder.indexOf(draggedPrompt);
-                    if (fromIdx >= 0) tagOrder.splice(fromIdx, 1);
-                    const toIdx = tagOrder.indexOf(targetPrompt);
-                    const insertIdx = toIdx >= 0 ? (after ? toIdx + 1 : toIdx) : tagOrder.length;
-                    tagOrder.splice(Math.min(insertIdx, tagOrder.length), 0, draggedPrompt);
-                    localStorage.setItem(tagOrderKey, JSON.stringify(tagOrder));
-                } catch {}
-                // Also reorder in state locally for immediate effect
-                const favItems = state?.promptAllInOne?.favorites?.[tagKind];
-                if (favItems) {
-                    const draggedId = dragged.id;
-                    const targetId = tag.id;
-                    const draggedIdx = favItems.findIndex((item) => item.id === draggedId || String(item.prompt || "").trim() === String(dragged.prompt || "").trim());
-                    if (draggedIdx >= 0) {
-                        const [moved] = favItems.splice(draggedIdx, 1);
-                        const targetIdx = favItems.findIndex((item) => item.id === targetId || String(item.prompt || "").trim() === String(tag.prompt || "").trim());
-                        const insertAt = targetIdx >= 0 ? (after ? targetIdx + 1 : targetIdx) : favItems.length;
-                        favItems.splice(insertAt, 0, moved);
-                    }
-                }
-                __webuiBridgeDraggedTag = null;
-                rerender?.();
-            }
-        });
     }
     button.classList.toggle("selected", promptContains(textarea.value, prompt, isNegative));
     return button;
@@ -18291,28 +18236,6 @@ function addStyles() {
         }
         .webui-bridge-aio-tag:hover {
             border-color: #6aa3ff;
-        }
-        .webui-bridge-aio-tag.webui-bridge-tag-insert-before::before {
-            content: "";
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 3px;
-            background: #6aa3ff;
-            z-index: 1;
-            pointer-events: none;
-        }
-        .webui-bridge-aio-tag.webui-bridge-tag-insert-after::after {
-            content: "";
-            position: absolute;
-            bottom: 0;
-            left: 0;
-            right: 0;
-            height: 3px;
-            background: #6aa3ff;
-            z-index: 1;
-            pointer-events: none;
         }
         .webui-bridge-aio-fav-remove {
             position: absolute;
