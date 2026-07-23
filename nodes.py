@@ -1033,23 +1033,11 @@ def _looks_like_webui_root(root):
     return root.is_dir() and (root / "models").is_dir() and ((root / "webui.py").exists() or (root / "launch.py").exists() or (root / "modules").is_dir())
 
 
-def _webui_root_from_candidate(value):
-    path = _existing_path(value)
-    if not path:
-        return None
-    candidates = [path]
-    candidates.extend(list(path.parents)[:4])
-    for candidate in candidates:
-        if _looks_like_webui_root(candidate):
-            return candidate
-    return None
-
-
 def _build_webui_config(webui_root):
     root_text = _truncate_text(webui_root, MAX_WEBUI_ROOT_LENGTH)
-    root = _webui_root_from_candidate(root_text)
-    if not root:
-        raise ValueError("WebUI 目录不存在或结构不完整；可选择 WebUI 根目录，也可直接选择 models/Lora 目录")
+    root = _existing_path(root_text)
+    if not root or not _looks_like_webui_root(root):
+        raise ValueError("WebUI 根目录不存在或结构不完整，请选择包含 models 且带 webui.py、launch.py 或 modules 的 WebUI 根目录")
     extensions = root / "extensions"
     detected = _detect_webui_paths(root)
     model_paths = {
@@ -1255,7 +1243,7 @@ def _apply_local_config(config):
 
 
 def _webui_integration_status(webui_root=None):
-    root = _webui_root_from_candidate(webui_root) or WEBUI_ROOT
+    root = _existing_path(webui_root) or WEBUI_ROOT
     config = {}
     error = ""
     if root:
@@ -1288,7 +1276,6 @@ _WEBUI_ROOT_DIR_NAMES = (
     "stable-diffusion-webui",
     "sd-webui",
 )
-_WEBUI_SEARCH_RELATIVE_BASES = ("", "AI", "AI/Tools", "Tools")
 
 
 def _local_drive_letters():
@@ -1326,19 +1313,6 @@ def _dedupe_root_texts(values):
     return result
 
 
-def _webui_candidates_under(drive_root):
-    candidates = []
-    for relative in _WEBUI_SEARCH_RELATIVE_BASES:
-        base = drive_root / Path(relative) if relative else drive_root
-        for name in _WEBUI_ROOT_DIR_NAMES:
-            candidates.append(base / name)
-        try:
-            candidates.extend(base.glob("sd-webui-aki*"))
-        except Exception:
-            pass
-    return candidates
-
-
 def _guess_webui_roots(preferred=None, use_cache=True):
     now = time.monotonic()
     preferred_values = _dedupe_root_texts([preferred])
@@ -1347,8 +1321,8 @@ def _guess_webui_roots(preferred=None, use_cache=True):
     if use_cache and preferred_values and now - float(_WEBUI_ROOT_GUESS_CACHE.get("time") or 0) < _WEBUI_ROOT_GUESS_TTL:
         preferred_found = []
         for value in preferred_values:
-            path = _webui_root_from_candidate(value)
-            if path:
+            path = _existing_path(value)
+            if path and ((path / "webui.py").exists() or (path / "launch.py").exists() or (path / "models").exists()):
                 preferred_found.append(_path_text(path))
         return _dedupe_root_texts([*preferred_found, *(_WEBUI_ROOT_GUESS_CACHE.get("roots") or [])])[:12]
     candidates = []
@@ -1368,17 +1342,24 @@ def _guess_webui_roots(preferred=None, use_cache=True):
         if value:
             candidates.append(value)
     for drive in _local_drive_letters():
+        for name in _WEBUI_ROOT_DIR_NAMES:
+            candidates.append(f"{drive}:/{name}")
         drive_root = Path(f"{drive}:/")
-        candidates.extend(_webui_candidates_under(drive_root))
+        try:
+            for child in drive_root.glob("sd-webui-aki*"):
+                candidates.append(child)
+        except Exception:
+            pass
     seen = set()
     found = []
     for candidate in _dedupe_root_texts(candidates):
-        path = _webui_root_from_candidate(candidate)
+        path = _existing_path(candidate)
         key = _path_text(path).lower() if path else ""
         if not path or key in seen:
             continue
-        seen.add(key)
-        found.append(_path_text(path))
+        if (path / "webui.py").exists() or (path / "launch.py").exists() or (path / "models").exists():
+            seen.add(key)
+            found.append(_path_text(path))
     found = found[:12]
     if use_cache and not preferred_values:
         _WEBUI_ROOT_GUESS_CACHE["time"] = now
@@ -2032,6 +2013,8 @@ def _load_prompt_all_in_one_favorites(kind):
                 "name": item.get("name") or prompt,
                 "prompt": prompt,
                 "tags": tags or [{"prompt": prompt, "local": item.get("name") or ""}],
+                "category": item.get("category") or "",
+                "subCategory": item.get("subCategory") or "",
             })
     return items
 
@@ -2234,26 +2217,44 @@ def _prompt_to_storage_tags(prompt, lang="zh_CN"):
     return tags
 
 
-def _make_prompt_item(prompt, name="", lang="zh_CN"):
+def _make_prompt_item(prompt, name="", lang="zh_CN", category="", sub_category=""):
     return {
         "id": str(uuid.uuid1()),
         "time": int(time.time()),
         "name": name or prompt[:60],
         "tags": _prompt_to_storage_tags(prompt, lang),
         "prompt": prompt,
+        "category": category or "",
+        "subCategory": sub_category or "",
     }
 
 
-def _push_prompt_all_in_one_item(collection, kind, prompt, name="", lang="zh_CN"):
+def _push_prompt_all_in_one_item(collection, kind, prompt, name="", lang="zh_CN", category="", sub_category=""):
     key = _storage_key(collection, kind)
     items = _storage_get(key, [])
     if not isinstance(items, list):
         items = []
     if collection == "history" and len(items) >= PROMPT_ALL_IN_ONE_HISTORY_MAX:
         items = items[-(PROMPT_ALL_IN_ONE_HISTORY_MAX - 1):]
-    item = _make_prompt_item(prompt, name, lang)
-    items.append(item)
-    _storage_set(key, items)
+    # 收藏去重：同一 category + sub_category 下 prompt 相同时跳过（空值等同于默认值）
+    item_prompt = str(prompt or "").strip()
+    item_category = str(category or "").strip() or "新增提示词"
+    item_sub_category = str(sub_category or "").strip() or "未分类"
+    skip = False
+    if collection == "favorite":
+        for existing in items:
+            existing_prompt = str(existing.get("prompt") or "").strip()
+            existing_cat = str(existing.get("category") or "").strip() or "新增提示词"
+            existing_sub = str(existing.get("subCategory") or "").strip() or "未分类"
+            if existing_prompt == item_prompt and existing_cat == item_category and existing_sub == item_sub_category:
+                skip = True
+                break
+    if not skip:
+        item = _make_prompt_item(prompt, name, lang, category, sub_category)
+        items.append(item)
+        _storage_set(key, items)
+    else:
+        item = None
     return item
 
 
@@ -2283,6 +2284,30 @@ def _delete_prompt_all_in_one_item(collection, kind, item_id="", prompt=""):
     del next_items[remove_index]
     _storage_set(key, next_items)
     return True
+
+
+def _update_prompt_all_in_one_favorite(kind, item_id, name="", category="", sub_category=""):
+    key = _storage_key("favorite", kind)
+    items = _storage_get(key, [])
+    if not isinstance(items, list):
+        return False
+    item_id = str(item_id or "")
+    if not item_id:
+        return False
+    updated = False
+    for index, item in enumerate(items):
+        if _prompt_all_in_one_item_id(item, index) == item_id:
+            if name is not None and name != "":
+                item["name"] = name
+            if category is not None and category != "":
+                item["category"] = category
+            if sub_category is not None and sub_category != "":
+                item["subCategory"] = sub_category
+            updated = True
+            break
+    if updated:
+        _storage_set(key, items)
+    return updated
 
 
 def _get_prompt_all_in_one_items(collection, kind):
@@ -6779,8 +6804,8 @@ def _register_routes():
             return rejected
         data = await request.json()
         root = _truncate_text(data.get("webui_root") or data.get("root") or "", MAX_WEBUI_ROOT_LENGTH)
-        if data.get("auto_detect"):
-            guesses = _guess_webui_roots(root, use_cache=False)
+        if not root and data.get("auto_detect"):
+            guesses = _guess_webui_roots()
             root = guesses[0] if guesses else ""
         if not root:
             return web.json_response({
@@ -6791,7 +6816,6 @@ def _register_routes():
         try:
             config = dict(LOCAL_CONFIG)
             config.update(_build_webui_config(root))
-            root = config["webui_root"]
             settings = dict(_bridge_settings())
             settings["data_source"] = "auto"
             settings["show_startup_wizard"] = False
@@ -7103,15 +7127,26 @@ def _register_routes():
         prompt = _truncate_text(data.get("prompt", ""), MAX_PROMPT_TEXT_LENGTH)
         name = _truncate_text(data.get("name", ""), MAX_STYLE_NAME_LENGTH)
         item_id = _truncate_text(data.get("id", ""), MAX_STYLE_NAME_LENGTH)
+        category = _truncate_text(data.get("category", ""), MAX_STYLE_NAME_LENGTH)
+        sub_category = _truncate_text(data.get("subCategory", ""), MAX_STYLE_NAME_LENGTH)
 
         if action == "push_history":
             item = _push_prompt_all_in_one_item("history", kind, prompt, name, lang)
             return web.json_response({"success": True, "item": item})
         if action == "push_favorite":
-            item = _push_prompt_all_in_one_item("favorite", kind, prompt, name, lang)
+            item = _push_prompt_all_in_one_item("favorite", kind, prompt, name, lang, category, sub_category)
             return web.json_response({
                 "success": True,
                 "item": item,
+                "favorites": {
+                    "positive": _load_prompt_all_in_one_favorites("positive"),
+                    "negative": _load_prompt_all_in_one_favorites("negative"),
+                },
+            })
+        if action == "update_favorite":
+            updated = _update_prompt_all_in_one_favorite(kind, item_id, name, category, sub_category)
+            return web.json_response({
+                "success": updated,
                 "favorites": {
                     "positive": _load_prompt_all_in_one_favorites("positive"),
                     "negative": _load_prompt_all_in_one_favorites("negative"),
